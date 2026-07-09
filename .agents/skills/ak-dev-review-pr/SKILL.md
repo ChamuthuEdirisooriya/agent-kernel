@@ -69,15 +69,23 @@ Load these skills and use them as the review rubric — do not review from memor
 1. **`ak-dev-architecture`** — always. Design principles, core abstractions, execution flow, directory structure.
 2. **`ak-dev-code-quality`** — always. Formatting, typing, logging, Python style, commit conventions, PR guidelines.
 3. **`ak-dev-testing-conventions`** — always. Test patterns, async testing, mocking, CI workflows.
-4. **The matching `ak-dev-new-*` guide when the PR adds or modifies that kind of component**:
-   - framework adapter → `ak-dev-new-framework-integration`
-   - guardrail provider → `ak-dev-new-guardrail-provider`
-   - knowledge base backend → `ak-dev-new-knowledgebase-integration`
-   - messaging platform → `ak-dev-new-messaging-integration`
-   - attachment storage backend → `ak-dev-new-multimodal-storage`
-   - tracing provider → `ak-dev-new-tracing-provider`
 
-   For these PRs, walk the guide's checklist step by step and flag every step the PR skipped (missing factory registration, missing config section, missing optional-dependency extra, missing exports, missing tests, missing example).
+Then route from the PR's changed file paths to the specialized skills. Take the file list from Step 1 and load every skill whose paths the PR touches:
+
+| Changed paths (under `ak-py/src/agentkernel/` unless noted) | Skill to load |
+| --- | --- |
+| `framework/<name>/` — new or modified framework adapter | `ak-dev-new-framework-integration` |
+| `guardrail/` — guardrail provider or hook changes | `ak-dev-new-guardrail-provider` |
+| `knowledgebase/` — knowledge base backend or builder tools | `ak-dev-new-knowledgebase-integration` |
+| `integration/<platform>/` — messaging platform handlers, webhook routes | `ak-dev-new-messaging-integration` |
+| `core/multimodal/` — attachment stores or multimodal handling | `ak-dev-new-multimodal-storage` |
+| `trace/` — tracing providers or traced runners | `ak-dev-new-tracing-provider` |
+| `docs/`, `README.md`, `ak-py/README.md`, deployment/example READMEs (repo root) | `ak-dev-sync-docs-from-branch` — use its docs-surface map to check the right surfaces were updated |
+| `.agents/skills/` or `ak-py/src/agentkernel/skills/` (user skills) | `ak-dev-sync-skills-from-branch` — use its conventions to judge skill content and placement |
+
+A PR can match several rows — load every matching skill. If the PR touches one of these areas only incidentally (e.g. a mechanical rename brushing `trace/`), a skim of the skill's checklist is enough; when the PR *adds or substantially modifies* that kind of component, walk the guide's checklist step by step and flag every step the PR skipped (missing factory registration, missing config section, missing optional-dependency extra, missing exports, missing tests, missing example).
+
+These skills are the source of truth for what "complete" means in each area. When a finding concerns one of these areas, cite the specific checklist step or convention from the loaded skill, not a general impression.
 
 ## Step 3: Review the Spec First (When the PR Contains One)
 
@@ -166,13 +174,13 @@ Build the request as JSON and submit it:
 cat > /tmp/pr-review.json <<'EOF'
 {
   "event": "COMMENT",
-  "body": "<summary: 2-4 sentences — overall assessment, count of findings by severity, anything positive worth noting>",
+  "body": "<summary in point form: a one-line overall assessment, then a bullet list — findings count by severity, un-anchorable findings as bullets, anything positive worth noting>",
   "comments": [
     {
       "path": "ak-py/src/agentkernel/core/session/redis.py",
       "line": 42,
       "side": "RIGHT",
-      "body": "**[blocker]** <what is wrong and why, citing the convention>. Suggestion: <concrete fix>."
+      "body": "**[blocker]** <one-line statement of the problem>\n\n- <why: the principle, convention, or failure scenario>\n- <suggestion: concrete fix>"
     }
   ]
 }
@@ -190,6 +198,7 @@ Rules for the posted review:
   - `[nit]` — style/polish; only include when the fix is trivial and unambiguous
   - `[question]` — genuine uncertainty about intent; phrase as a question
 - Every comment must cite *why* — the principle, convention, or concrete failure scenario — not just *what*. Include a concrete suggested fix when one exists.
+- **Write comments in point form, not paragraphs.** Each comment is one bold severity-tagged line stating the problem, followed by short bullets (why, suggestion, references). Nest bullets when a point has sub-details. A `[nit]` may be a single line; anything longer than a sentence or two must be bulleted — never a wall of prose.
 - If posting fails on a specific comment (usually a line-anchoring error), move that finding into the summary body and retry rather than dropping it.
 
 ## Output Expectations
@@ -212,6 +221,8 @@ After posting, report back to the requester:
 - Approving or requesting changes — this skill only ever comments.
 - Restating feedback that is already on the PR.
 - Flagging formatting that `black`/`isort` would fix anyway as individual nits — one summary-level note ("run `make lint`") is enough.
+- Writing comments as dense paragraphs — point-form bullets are far easier for the author to scan and act on.
 - Reviewing from memory of the conventions instead of loading the `ak-dev-*` skills.
+- Loading only the three always-on skills and skipping the path-to-skill routing in Step 2 — component PRs then get reviewed without the checklist that defines what "complete" means for that component.
 - Reading the implementation before the spec when the PR contains a `spec.md` — the code biases how the spec is judged, and spec gaps get rationalized as intended behavior.
 - Reviewing code against the spec but forgetting to review the spec document itself.
