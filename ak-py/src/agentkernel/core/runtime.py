@@ -14,6 +14,7 @@ from .base import Agent, Session
 from .builder import SessionStoreBuilder
 from .model import (
     AgentReply,
+    AgentReplyAny,
     AgentReplyImage,
     AgentReplyText,
     AgentRequest,
@@ -163,7 +164,7 @@ class Runtime:
         pre_hooks = agent.pre_hooks + self._get_system_pre_hooks()  # system pre-hooks are always executed last
         for hook in pre_hooks:
             reply = await hook.on_run(session, agent, requests)
-            if isinstance(reply, (AgentReplyText, AgentReplyImage)):
+            if isinstance(reply, (AgentReplyText, AgentReplyImage, AgentReplyAny)):
                 return reply
 
             # Validation to ensure the correct type is returned from the hooks. This is important to avoid runtime errors.
@@ -196,7 +197,7 @@ class Runtime:
         async with session:
             try:
                 requests_or_reply = await self._prepare_requests(agent, session, requests)
-                if isinstance(requests_or_reply, (AgentReplyText, AgentReplyImage)):
+                if isinstance(requests_or_reply, (AgentReplyText, AgentReplyImage, AgentReplyAny)):
                     self._log.debug(f"PreHook halted execution for agent '{agent.name}' by hook chain with reply: {requests_or_reply}")
                     return requests_or_reply
                 requests = requests_or_reply
@@ -208,7 +209,7 @@ class Runtime:
                 post_hooks = self._get_system_post_hooks() + agent.post_hooks  # system post-hooks are always executed first
                 for hook in post_hooks:
                     reply = await hook.on_run(session, requests, agent, reply)
-                    if not isinstance(reply, (AgentReplyText, AgentReplyImage)):
+                    if not isinstance(reply, (AgentReplyText, AgentReplyImage, AgentReplyAny)):
                         raise TypeError(f"PostHook '{hook.name()}' returned an invalid type. Expected AgentReply, got {type(reply)}")
                     self._log.debug(f"PostHook executed for agent '{agent.name}' by hook '{hook.name()}' reply: {reply}")
 
@@ -233,7 +234,7 @@ class Runtime:
         async with session:
             try:
                 requests_or_reply = await self._prepare_requests(agent, session, requests)
-                if isinstance(requests_or_reply, (AgentReplyText, AgentReplyImage)):
+                if isinstance(requests_or_reply, (AgentReplyText, AgentReplyImage, AgentReplyAny)):
                     self._log.debug(f"PreHook halted streaming for agent '{agent.name}' by hook chain with reply: {requests_or_reply}")
                     yield StreamChunk(error=str(requests_or_reply), done=True)
                     return
