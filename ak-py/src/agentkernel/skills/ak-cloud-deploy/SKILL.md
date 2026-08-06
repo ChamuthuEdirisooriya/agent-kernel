@@ -58,6 +58,8 @@ Use official modules:
 
 Use current module version (`0.8.1`) unless user requests another.
 
+All modules are provider-agnostic: they declare `required_providers` but do not configure them internally. Configure each provider (`aws`/`docker`, `azurerm`, or `google`/`google-beta`/`docker`) in the root module and pass it explicitly via the module's `providers = { ... }` argument, as shown in the examples below. Azure's containerized module builds and pushes its image via a nested submodule with its own internal `docker` provider, so no `docker` provider needs to be configured or passed by the caller there.
+
 AWS-only features in this skill:
 - `execution_mode`
 - `queue_mode`
@@ -299,7 +301,7 @@ module "serverless_agents" {
     timeout              = 45
     memory_size          = 256
     environment_variables = {
-      OPENAI_API_KEY = var.openai_api_key
+    OPENAI_API_KEY = var.openai_api_key
     }
   }
 
