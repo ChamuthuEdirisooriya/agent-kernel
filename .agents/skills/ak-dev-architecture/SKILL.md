@@ -198,7 +198,7 @@ Provides persistent, named conversation threads keyed by `session_id`, gated beh
 
 - **`ConversationThreadManager`** (`manager.py`): Service façade owning thread lifecycle (create/load/append/history) and, when multimodal is enabled, saving attachment bytes into the shared `AttachmentStore` before the agent runs. A single process-wide instance (`ConversationThreadManager.get()` / class-level singleton, guarded by an `RLock`) is shared by `ChatService` and `ThreadRESTRequestHandler` — `None` when thread support is disabled
 - **`ThreadStore`** (`store/base.py`): Abstract base with backend persistence methods (create/get/append/list); pluggable per backend
-- **`ThreadStoreBuilder`** (`store/__init__.py`): Factory that constructs the configured `ThreadStore` from `AKConfig`'s `thread.type`
+- **`ThreadStoreBuilder`** (`store/base.py`): Factory that constructs the configured `ThreadStore` from `AKConfig`'s `thread.type`
 - **`Thread` / `ThreadMessage` / `ThreadAttachment` / `ThreadPage` / `MessagePage`** (`model.py`): Pydantic models for thread metadata, individual messages, attachment references, and cursor-paginated listings
 - **`ThreadNamingStrategy`** (`naming.py`): Overridable strategy that names auto-created threads — default implementation makes a single LiteLLM call (`thread.naming.model`, requires the `thread` extra) to derive a concise title from the first prompt, falling back to a truncated prompt prefix when `litellm`/an API key is unavailable. Explicit `thread_name` on a chat request always wins and locks the thread against further automatic naming
 - **`Authoriser`** (`authoriser.py`): Pluggable base class (`authorise(token) -> Optional[user_id]`) that `ThreadRESTRequestHandler` calls to protect the read routes; routes are open when no `Authoriser` is configured
@@ -210,6 +210,7 @@ Provides persistent, named conversation threads keyed by `session_id`, gated beh
 |---------|-------|--------|------------|
 | In-memory | `InMemoryThreadStore` | `store/in_memory.py` | `ClassVar` dict, ephemeral, zero setup |
 | Redis | `RedisThreadStore` | `store/redis.py` | Persistent, TTL, index-key expiry/refresh for listings |
+| Valkey | `ValkeyThreadStore` | `store/valkey.py` | Redis-protocol twin of the above; shares the body via `_RedisLikeThreadStore` (`store/redis_like.py`), requires the `valkey` extra |
 | DynamoDB | `DynamoDBThreadStore` | `store/dynamodb.py` | Serverless/AWS, partition key `session_id` + sort key `sk`, optional TTL |
 | Firestore | `FirestoreThreadStore` | `store/firestore.py` | Serverless/GCP, one document per `session_id` |
 | Cosmos DB | `CosmosDBThreadStore` | `store/cosmosdb.py` | Azure Table API, partitioned by `session_id`, no TTL support |
@@ -218,7 +219,7 @@ Provides persistent, named conversation threads keyed by `session_id`, gated beh
 
 ```yaml
 thread:
-  type: memory       # memory | redis | dynamodb | firestore | cosmosdb
+  type: memory       # memory | redis | valkey | dynamodb | firestore | cosmosdb
   naming:
     model: gpt-4o-mini
     max_length: 80
@@ -226,10 +227,23 @@ thread:
     url: "redis://localhost:6379"
     ttl: 2592000
     prefix: "ak:thread:"
+  valkey:
+    url: "valkey://localhost:6379"
+    ttl: 2592000
+    prefix: "ak:thread:"
   dynamodb:
     table_name: "ak-agent-threads"
     ttl: 0
 ```
+
+Deployment splits the same way session does: the **application** declares `thread.type` in its
+committed `config.yaml`, and **Terraform** provisions the backend and injects only the connection
+detail — `create_dynamodb_thread_table` (AWS serverless + containerized) injects
+`AK_THREAD__DYNAMODB__TABLE_NAME`; `create_firestore_thread_collection` (GCP) injects the
+`AK_THREAD__FIRESTORE__*` vars. Terraform never sets `AK_THREAD__TYPE`. Note the failure mode this
+leaves: because `AKConfig.thread` is `Optional` and any `AK_THREAD__*` var materialises it while
+`type` defaults to `memory`, setting a flag *without* declaring `thread.type` enables the feature on
+the non-durable in-memory backend, with no error.
 
 Attachments in thread mode additionally require `multimodal.enabled: true` with a shared attachment store (`in_memory`, `redis`, or `dynamodb` — `session_cache` is rejected, since threads need durable, cross-request-scoped attachment storage that a session-local cache can't provide).
 

@@ -14,6 +14,9 @@ locals {
     var.dynamodb_memory_table_arn != null ? {
       AK_SESSION__DYNAMODB__TABLE_NAME = var.dynamodb_memory_table_name
     } : {},
+    var.dynamodb_thread_table_arn != null ? {
+      AK_THREAD__DYNAMODB__TABLE_NAME = var.dynamodb_thread_table_name
+    } : {},
     # WebSocket modes: full response (async) vs per-token chunks (stream).
     contains(["async", "stream"], var.execution_mode) ? {
       AK_EXECUTION__MODE = var.execution_mode
@@ -155,6 +158,37 @@ resource "aws_iam_role_policy_attachment" "agent_runner_dynamodb_memory_attachme
   count      = var.create_dynamodb_memory_table ? 1 : 0
   role       = aws_iam_role.agent_runner_task_role.name
   policy_arn = aws_iam_policy.agent_runner_dynamodb_memory_policy[0].arn
+}
+
+resource "aws_iam_policy" "agent_runner_dynamodb_thread_policy" {
+  count = var.create_dynamodb_thread_table ? 1 : 0
+  name  = "${var.prefix}-agent-runner-dynamodb-thread"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:Query",
+        "dynamodb:Scan"
+      ]
+      # No /index/* unlike the session policy: list_threads Scans, this table has no GSI.
+      Resource = var.dynamodb_thread_table_arn
+    }]
+  })
+
+  tags = var.tags
+}
+
+resource "aws_iam_role_policy_attachment" "agent_runner_dynamodb_thread_attachment" {
+  count      = var.create_dynamodb_thread_table ? 1 : 0
+  role       = aws_iam_role.agent_runner_task_role.name
+  policy_arn = aws_iam_policy.agent_runner_dynamodb_thread_policy[0].arn
 }
 
 # ECS Resources

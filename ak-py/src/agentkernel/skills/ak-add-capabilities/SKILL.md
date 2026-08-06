@@ -6,8 +6,8 @@ description: >
   A2A server, pre/post hooks, multimodal support, conversation thread support, and the sandbox
   capability (isolated code execution). Session
   persistence supports Redis, DynamoDB (AWS), Cosmos DB (Azure), and Firestore (GCP).
-  Conversation threads support in-memory, Redis, DynamoDB (AWS), Firestore (GCP), and
-  Cosmos DB (Azure) backends. Generates configuration and code changes needed.
+  Conversation threads support in-memory, Redis, Valkey, DynamoDB (AWS), Firestore (GCP),
+  and Cosmos DB (Azure) backends. Generates configuration and code changes needed.
 license: Apache-2.0
 metadata:
   author: yaalalabs
@@ -732,7 +732,7 @@ dependencies = [
 2. Update `config.yaml`:
 ```yaml
 thread:
-  type: memory  # other supported backends: redis | dynamodb | firestore | cosmosdb
+  type: memory  # other supported backends: redis | valkey | dynamodb | firestore | cosmosdb
 ```
 
 3. No further code changes needed. When enabled:
