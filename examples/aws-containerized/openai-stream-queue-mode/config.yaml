@@ -5,10 +5,10 @@ logging:
 session:
   type: dynamodb
   dynamodb:
-    table_name: "ak-oai-ws-scl-dev-scalable-session_store"
+    table_name: "ak-oai-ws-q-dev-stream-session_store"
 
 execution:
-  mode: async
+  mode: stream
   queues:
     input:
       url: "" # injected by Terraform via AK_EXECUTION__QUEUES__INPUT__URL
