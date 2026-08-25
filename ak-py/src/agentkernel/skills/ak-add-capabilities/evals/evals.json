@@ -1,6 +1,6 @@
 {
   "skill": "ak-add-capabilities",
-  "description": "Evaluations for the ak-add-capabilities (guardrails, tracing, sessions, knowledge base, MCP, A2A, AG-UI, hooks, multimodal, conversation threads, sandbox, scheduling) skill",
+  "description": "Evaluations for the ak-add-capabilities (guardrails, tracing, sessions, knowledge base, MCP, A2A, AG-UI, hooks, multimodal, conversation threads, scheduled tasks, sandbox) skill",
   "version": "0.8.1",
   "evals": [
     {
@@ -419,6 +419,24 @@
         "schedule:",
         "cron",
         "agentkernel[cron]"
+      ]
+    },
+    {
+      "id": "cap-schedule-eventbridge",
+      "name": "Add scheduled tasks with the EventBridge provider",
+      "input": "Add scheduled tasks to my AWS project using EventBridge Scheduler and DynamoDB",
+      "expected_outputs": [
+        "schedule:",
+        "provider:",
+        "type: eventbridge",
+        "store:",
+        "type: dynamodb",
+        "agentkernel[",
+        "aws",
+        "cron"
+      ],
+      "must_not_contain": [
+        "type: local"
       ]
     }
   ]
