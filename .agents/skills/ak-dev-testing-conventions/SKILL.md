@@ -126,8 +126,7 @@ class DummyRunner(Runner):
 
     async def stream(self, agent, session, requests):
         # Runner.stream() is abstract — implement even in test doubles.
-        # Raise NotImplementedError() (with a trailing `yield`) if the test doesn't exercise streaming,
-        # or yield token strings to test Runtime.stream() / AgentService.stream_multi().
+        # Raise NotImplementedError() (with a trailing `yield`) if the test doesn't exercise streaming.
         raise NotImplementedError()
         yield
 
@@ -143,6 +142,32 @@ class DummyAgent(Agent):
     def get_a2a_card(self):
         return None
 ```
+
+**A double that *does* exercise streaming yields events, not strings.** `Runner.stream()` is typed
+`AsyncGenerator[StreamEvent, None]`, and `StreamChunk.event` is a discriminated union — so a bare
+`str` raises a `ValidationError` the moment `Runtime.stream()` wraps it. A double owns its own
+boundaries:
+
+```python
+from agentkernel.core.event import MessageEnd, MessageStart, TextDelta
+
+
+class StreamingDummyRunner(Runner):
+    async def run(self, agent, session, requests):
+        return AgentReplyText(response="ok")
+
+    async def stream(self, agent, session, requests):
+        yield MessageStart(message_id="m-1")
+        for token in ("Hel", "lo"):
+            yield TextDelta(message_id="m-1", content=token)
+        yield MessageEnd(message_id="m-1")
+```
+
+Only `TextDelta` and `ReasoningDelta` reach `PostHook.on_stream_chunk()`, and only `TextDelta` is
+projected into `StreamChunk.delta` — so a test that accumulates the reply must filter on
+`chunk.delta is not None` rather than slice by position. (`delta` is a model field, so the attribute
+always exists; it is `None` on every non-text frame. Key *presence* is the wire-format rule, which
+applies to the serialised SSE frames, not to the objects a test sees.)
 
 ### Async Test Patterns
 

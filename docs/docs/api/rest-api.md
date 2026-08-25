@@ -339,22 +339,29 @@ if __name__ == "__main__":
 
 ## Streaming
 
-Set `execution.mode: stream` in `config.yaml` (or `AK_EXECUTION__MODE=stream`) to enable token-level streaming. When this mode is active, `POST /api/v1/chat` and `POST /api/v1/chat-multipart` return a `text/event-stream` (SSE) response instead of JSON; no other code changes are required.
+Set `execution.mode: stream` in `config.yaml` (or `AK_EXECUTION__MODE=stream`) to enable event streaming. When this mode is active, `POST /api/v1/chat` and `POST /api/v1/chat-multipart` return a `text/event-stream` (SSE) response instead of JSON; no other code changes are required.
 
 **Request:** Same JSON/multipart payload as the non-streaming endpoints.
 
 **Response:** A stream of `data:` events, each a JSON-encoded chunk:
 
 ```
-data: {"delta": "Hello", "done": false, "session_id": "user-123"}
+data: {"event": {"type": "message_start", "message_id": "m1", "role": "assistant"}, "done": false, "session_id": "user-123"}
 
-data: {"delta": " world", "done": false, "session_id": "user-123"}
+data: {"delta": "Hello", "event": {"type": "text_delta", "message_id": "m1", "content": "Hello"}, "done": false, "session_id": "user-123"}
 
-data: {"delta": "!", "done": true, "session_id": "user-123"}
+data: {"delta": " world", "event": {"type": "text_delta", "message_id": "m1", "content": " world"}, "done": false, "session_id": "user-123"}
+
+data: {"event": {"type": "message_end", "message_id": "m1"}, "done": false, "session_id": "user-123"}
+
+data: {"done": true, "session_id": "user-123"}
 
 ```
 
-Reassemble the `delta` fields in order to build the full response. The final chunk has `"done": true`. If an unrecoverable error occurs mid-stream, the final chunk contains `"error"` instead of `"delta"`.
+Every frame carries `event` — the typed event it was built from — and `delta` appears **only** on a
+`text_delta`. Boundary and tool-call frames therefore have no `delta` key at all, and the terminal
+`{"done": true}` frame has neither: reassemble by testing for the key rather than by position. If an
+unrecoverable error occurs mid-stream, the final chunk contains `"error"` instead.
 
 **Client example (Python):**
 
@@ -371,7 +378,10 @@ with httpx.stream("POST", "http://localhost:8000/api/v1/chat", json={
             print(line.removeprefix("data:").strip())
 ```
 
-**Framework support:** OpenAI Agents SDK, Google ADK, LangGraph, and Pydantic AI support token streaming. CrewAI and smolagents raise `NotImplementedError` when `execution.mode: stream` is used; use `rest_sync` for those frameworks instead.
+**Framework support:** OpenAI Agents SDK, Google ADK, LangGraph, and Pydantic AI stream through their
+Agent Kernel adapters. CrewAI and smolagents SDKs support streaming, but their AK adapters do not
+implement `Runner.stream()` yet — they raise `NotImplementedError` when `execution.mode: stream` is
+used; use `rest_sync` for those frameworks instead.
 
 For WebSocket-based streaming on AWS Lambda (serverless), see the [AWS Serverless deployment guide](/docs/deployment/aws-serverless#websocket-configuration) and the [streaming-openai example](https://github.com/yaalalabs/agent-kernel/tree/develop/examples/aws-serverless/streaming-openai).
 

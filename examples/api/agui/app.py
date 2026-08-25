@@ -1,13 +1,40 @@
+import os
 from pathlib import Path
 from typing import Optional
 
-from agentkernel.agui import AGUIRequestHandler
+from agentkernel.agui import AGUIRequestHandler, AGUIState
 from agentkernel.api import RESTAPI
 from agentkernel.auth import Authoriser
-from agentkernel.openai import OpenAIModule
-from agents import Agent
+from agentkernel.core import Session
+from agentkernel.openai import OpenAIModule, OpenAIToolBuilder
+from agents import Agent, ModelSettings
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
+from openai.types.shared import Reasoning
+
+
+def count_open_tasks() -> str:
+    """
+    Count how many tasks on the shared list are still open.
+
+    Call this when the user asks how much is left rather than what the list contains.
+    """
+    session = Session.current()
+    tasks = (AGUIState.read_state(session) or {}).get("tasks") if session else None
+    tasks = tasks if isinstance(tasks, list) else []
+    still_open = sum(1 for task in tasks if isinstance(task, dict) and not task.get("done"))
+    return f"{still_open} of {len(tasks)} still open"
+
+
+# The default model does not reason, so the frontend's thinking block stays empty. Set this to a
+# reasoning-capable model to see it fill in — and note the summary is requested below, because a
+# reasoning model that is not asked for one still streams nothing to render.
+REASONING_MODEL = os.getenv("AK_DEMO_REASONING_MODEL")
+_reasoning_kwargs = (
+    {"model": REASONING_MODEL, "model_settings": ModelSettings(reasoning=Reasoning(summary="auto"))}
+    if REASONING_MODEL
+    else {}
+)
 
 planner_agent = Agent(
     name="planner",
@@ -16,10 +43,13 @@ planner_agent = Agent(
     "Whenever the user adds, completes, renames or removes a task, read the current state, then write "
     "the full new list back with update_agui_state. The user only sees a change once you have written "
     "it — describing it in your reply changes nothing on their screen.\n"
+    "When the user asks how many tasks are left, call count_open_tasks rather than counting yourself.\n"
     "When the user asks about something they never told you in this conversation — their local time, "
     "the page they are on, a preference — call get_agui_context and get_forwarded_props first. Do not "
     "say you do not know until you have looked.\n"
     "Keep replies to one short sentence.",
+    tools=OpenAIToolBuilder.bind([count_open_tasks]),
+    **_reasoning_kwargs,
 )
 
 
