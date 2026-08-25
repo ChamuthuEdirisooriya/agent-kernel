@@ -83,6 +83,7 @@ Global orchestrator and agent registry:
 
 - **Singleton**: `Runtime.current()` returns the global `GlobalRuntime` instance (or the active context-managed runtime)
 - **Agent registry**: `register(agent)`, `deregister(agent)`, `agents()` (returns `dict[str, Agent]`)
+- **`ensure_agent_available(name)`** (static): the shared precheck for surfaces that commit state *before* the agent runs — a thread write, a scheduled task. Applies the same rule `AgentHandler.initialize` applies when it selects (a named agent must be registered; an unnamed one needs at least one agent to default to) and raises `ValueError("No agent available")`, so an unanswerable request fails while the caller is still listening
 - **Session store**: `sessions()` returns the configured `SessionStore`
 - **`run(agent, session, requests, acting_user_id=None) -> AgentReply`**: The central execution method:
   1. Acquires session lock (`async with session`)
@@ -130,6 +131,10 @@ knowledge of conversation threads (that lives in `integration/thread/`).
     internally; surfaces that need the session object *between* load and run — AG-UI writes state and
     client context onto it before the runner starts — call `ChatService.prepare_agent_handler` directly
     instead, since `execute_stream` hides the handler
+  - Two scheduling checks run at the top of each entry point, before validation and agent selection:
+    `_maybe_schedule` defers a request carrying a `schedule` block (returning the 202 acknowledgement
+    instead of running it) and `_record_trigger` records the occurrence of a scheduled trigger. Both reach
+    `schedule/` through a lazy import inside the enabled-check — see the Scheduling section
 - **Presentation wrappers**: `process_chat_request`, `process_async_chat_request`,
   `process_stream_chat_async`, `process_stream_chat_sync`: thin shells over the core adding the HTTP shapes
   (`ResponseBuilder` JSON dicts / `HTTPException` per `rest_api_mode`, SSE frames). Used by the REST handler
@@ -208,7 +213,8 @@ Pydantic-based configuration:
 - **Auto-initialized** at import time via `AKConfig._set()`
 - **Config sources** (priority order): environment variables (`AK_` prefix) → config file (YAML/JSON, default `config.yaml`) → defaults
 - **Override path**: Set `AK_CONFIG_PATH_OVERRIDE` env var
-- **Key sections**: `session`, `api`, `websocket_api`, `a2a`, `mcp`, `slack`, `whatsapp`, `messenger`, `instagram`, `telegram`, `gmail`, `multimodal`, `trace`, `guardrail`, `execution`, `logging`
+- **Key sections**: `session`, `api`, `websocket_api`, `a2a`, `mcp`, `slack`, `whatsapp`, `messenger`, `instagram`, `telegram`, `gmail`, `multimodal`, `thread`, `schedule`, `trace`, `guardrail`, `sandbox`, `execution`, `logging`
+- **Optional (capability-gating) sections**: `thread` and `schedule` are `Optional` — the presence of the block is the enabled-check, so they have no default value
 
 ## Request/Reply Model (`ak-py/src/agentkernel/core/model.py`)
 
@@ -308,7 +314,7 @@ platforms own the history), and thread recording does not apply to queue-mode/de
 
 ### Key Components
 
-- **`AgentThreadRequestHandler`** (`thread_chat.py`): extends `AgentRESTRequestHandler`, serving the same chat routes with thread recording wrapped around the ChatService execution core (build requests via `RequestBuilder` → `ThreadRecorder.pre_run` → `execute`/`execute_stream` with the prebuilt list → `ThreadRecorder.post_run`), plus the read routes. Fails fast in `__init__` when no `thread` config block exists; prechecks agent availability before any thread write (no phantom threads); `user_id` is required on its chat routes (and only there). Streaming accumulates deltas and skips recording on an error chunk or empty stream
+- **`AgentThreadRequestHandler`** (`thread_chat.py`): extends `AgentRESTRequestHandler`, serving the same chat routes with thread recording wrapped around the ChatService execution core (build requests via `RequestBuilder` → `ThreadRecorder.pre_run` → `execute`/`execute_stream` with the prebuilt list → `ThreadRecorder.post_run`), plus the read routes. Fails fast in `__init__` when no `thread` config block exists; prechecks agent availability before any thread write (no phantom threads; the shared `Runtime.ensure_agent_available`); `user_id` is required on its chat routes (and only there). Streaming accumulates deltas and skips recording on an error chunk or empty stream
 - **`ThreadRecorder`** (`recorder.py`): the recording logic as a reusable class over `ConversationThreadManager`: `pre_run` (enforce `user_id`, store attachment bytes and rewrite to `AgentRequestAttachmentRef`, get-or-create thread, append user message; `store_attachments` runs first so config rejections leave no phantom thread) and `post_run` (append assistant message)
 - **`ConversationThreadManager`** (`manager.py`): Service façade owning thread lifecycle (create/load/append/history) and, when multimodal is enabled, saving attachment bytes into the shared `AttachmentStore` before the agent runs. A single process-wide instance (`ConversationThreadManager.get()` / class-level singleton, guarded by an `RLock`) is used by `ThreadRecorder` and `ThreadRESTRequestHandler`: `None` when no `thread` config block is present
 - **`ThreadStore`** (`store/base.py`): Abstract base with backend persistence methods (create/get/append/list); pluggable per backend
@@ -424,6 +430,71 @@ Only `OpenAIRunner`, `LangGraphRunner`, `ADKRunner` and `PydanticAIRunner` curre
 `examples/api/agui` for a full demo (OpenAI Agents SDK agent + React/Vite frontend against
 `@ag-ui/core`).
 
+## Scheduling (`ak-py/src/agentkernel/schedule/`)
+
+Deferred and recurring chat execution: a chat request carrying a `schedule` block is not run — it is
+registered as a scheduled task and acknowledged with **HTTP 202**. When an occurrence is due, the
+configured provider delivers a plain chat request into the **input queue**, where the normal execution
+path picks it up. A `schedule` block in `config.yaml` enables the capability; its absence disables it
+(`ScheduleManager.get()` returning `None` is the enabled-check, the thread pattern).
+
+Coupling rules: `core/` reaches `schedule/` only lazily, inside enabled-checks (the sandbox precedent);
+`schedule/manager.py`, `model.py`, `provider/` and `store/` import only `core` and `pipeline`; nothing in
+`core/` imports the FastAPI-dependent handler.
+
+### Key Components
+
+- **`ScheduleSpec`** (`core/model.py`, not `schedule/`): the chat-envelope block (`at` | `cron`, `timezone`, `session_mode`). It lives in core beside `BaseChatRequest` so core never imports the capability; structural validation only (exactly one of at/cron) — cron syntax, timezone and "at is in the future" are semantic checks the manager runs
+- **Interception point** (`ChatService._maybe_schedule`): all four execution-core entry points check `req.schedule` **before** validation and agent selection, and return an `AgentReplyAny` acknowledgement (`{"status": "SCHEDULED", "scheduled_task_id", "session_id"}`) instead of running. Streaming surfaces yield that acknowledgement as a single terminal `StreamChunk` (not an error chunk). `_record_trigger` (same class, also at the top) records the occurrence of a request that carries `scheduled_task_id`, then lets it run normally — it never raises into the run. The 202 travels through `ChatService._success_status` and, in `rest_api_mode`, a `JSONResponse`; `AgentThreadRequestHandler` checks `req.schedule` before `ThreadRecorder.pre_run`, so a deferred request creates no thread and records no messages
+- **`ScheduleManager`** (`manager.py`): process-wide singleton (`ScheduleManager.get()`, `RLock`-guarded, `reset()` for tests) owning semantic validation, ownership (`PermissionError`), the store-then-provider write order with rollback, the frozen trigger body, and occurrence recording. At construction it fails fast (`AKConfigError`) twice: `_validate_transport_compatibility` when the provider cannot deliver to the transport `QueueTransportFactory.resolve_type()` reports, and `_validate_local_provider_topology` when `provider.type` is `local` and either that transport or `store.type` is not `in_memory` — the local heap and the in-memory store are reachable only from their own process's threads, so on a broker transport the management routes (IOHandler process) would amend timers the agent-runner process actually owns. Two methods, not one, because delivery is unaffected: `local` + `sqs` fires correctly and is only unmanageable. `update` is PUT semantics down to the manager: the occurrence rule is replaced **as a unit**, so an amendment naming any of at/cron/timezone/session_mode rebuilds the whole spec from what it carries (omitted fields fall back to their defaults, never to the stored values), while an amendment naming none of them leaves the rule untouched — that is how a prompt-only or pause/resume amendment works. `create` covers all three creation paths (chat block, `create_schedule` tool, BYO caller), so its validation is where a bad task is stopped: owner, prompt and session present, occurrence rule resolvable, and — via `Runtime.ensure_agent_available` — a **named** agent that is actually registered. An unnamed agent is deliberately *not* prechecked: the default is resolved by whichever process fires the occurrence, which need not be this one
+- **`ScheduledTask` / `ScheduledTaskPage` / `ScheduleStatus`** (`model.py`): the stored record (all JSON primitives, ISO-8601 UTC timestamp strings) and cursor-paginated listings, using the shared `core/util/pagination.py` helpers (`encode_cursor`/`decode_cursor`/`clamp_limit`/`paginate` plus `MAX_PAGE_SIZE` and `DEFAULT_PAGE_SIZE`, the one default the manager and the store signatures beneath it both read). Statuses: `active`, `paused`, `completed`, `cancelled`
+- **`OccurrenceCalculator`** (`timing.py`): shared interpretation of a spec's occurrence rule — `validate()` for the manager, `next_fire_time()` for the local provider. `croniter` (the `cron` extra) is imported on demand, so `at`-only schedules work without it
+- **`ScheduleProvider`** (`provider/base.py`): ABC (`create`/`update`/`delete`/`get`) plus `ScheduleProviderFactory`. `supported_transports` (a `ClassVar`, `None` = transport-agnostic) is what the manager's fail-fast reads; `message_group_id(task)` is the shared FIFO-grouping rule (reused session → that session, per-occurrence session → the task)
+- **`LocalScheduleProvider`** (`provider/local.py`): the default. One daemon thread per process over a min-heap of armed occurrences guarded by a `threading.Condition`; substitutes the occurrence tokens at fire time and sends into `QueueName.INPUT`. Delivery failures skip the occurrence and leave the next one armed. Armed occurrences do not survive a process restart (documented boundary), and the heap is reachable only from this process's threads, which is what pins the provider to the single-process topology (the manager's second fail-fast)
+- **`ScheduleStore`** (`store/base.py`): ABC (`create`/`get`/`update` full-record/`delete` rollback-only/`list`/`record_trigger`/`clear`) plus `ScheduleStoreBuilder`, the `ThreadStoreBuilder` shape (built-in short names, else a dotted path, else `AKConfigError`)
+- **`ScheduleRESTRequestHandler`** (`handler.py`): the read-and-manage surface over tasks, extending the shared `AuthorisedRESTRequestHandler` (`api/handler.py`) so bearer parsing and the three 401 details live in one place. Serves `GET /api/v1/schedules` (cursor-paginated list) and `GET`/`PUT`/`DELETE /api/v1/schedules/{task_id}` (read, amend, cancel). **No POST**: creation is the chat API's `schedule` block or the `create_schedule` tool, so callers and agents share one creation path. The manager is resolved per request (`None` → 404 `"Scheduling is not configured"`, the `ThreadRESTRequestHandler` convention), and every route maps manager errors through one `_as_http_error` helper: `PermissionError` → 403 (checked before the `None` → 404), `KeyError` → 404, `ValueError` → 400, anything else (including `ScheduleError`) → 500. With an `Authoriser`, listings are forced to the resolved user and the single-task routes enforce ownership; without one the routes are open. `PUT` takes a `ScheduleAmendment` body carrying the **full** amendable state (prompt, `at`/`cron`/`timezone`/`session_mode`, `status` limited to `active`/`paused`) — an omitted occurrence field clears it. This is the only module in `schedule/` that imports FastAPI, so it is exported lazily from `schedule/__init__.py` (the `agentkernel.pipeline` `__getattr__` pattern) and runner processes never load it
+- **Mounting**: always the application's, on every surface, exactly like the Slack and thread handlers — `RESTAPI.run(handlers=[AgentRESTRequestHandler(), ScheduleRESTRequestHandler(authoriser=...)])`, or `IOHandler.run(handlers=[ScheduleRESTRequestHandler(authoriser=...)])` in the pipeline single-process topology, where the passed handlers are mounted **alongside** the pipeline's own `RequestHandler()` (the queue producer is not a replaceable default). Nothing is mounted from config: a `schedule` block enables deferring and the agent tools, not routes. Mounting is also where the backends are validated — `get_router()` calls `ScheduleManager.validate_configuration()` (a no-op when the capability is off), so an unusable provider/transport pairing or incomplete provider config fails the app build instead of the first request. No layer outside the capability knows the scheduling backends exist: an agent-tools-only app, mounting no routes, builds them on first use. `RESTAPI.run()`'s delegation rule is untouched (no-explicit-handlers only), so an app wanting the routes in this topology calls `IOHandler.run(handlers=[...])` directly
+- **Agent surface** (`tools.py`): five system tools attached by `SystemToolFactory` when the block is present, optionally scoped to `schedule.agents` — `create_schedule`, `list_schedules`, `get_schedule`, `update_schedule`, `delete_schedule`. Sandbox conventions throughout: all `async`, JSON-string returns, `{"error": ...}` on failure, nothing raised into the framework; the capability's whole system-prompt section rides `create_schedule.description` while the other four are `""` (the `if tool.description` filter in `get_system_prompt_suffix`). Every tool acts as the **acting user** — `Session.current().get_volatile_cache().get(ACTING_USER_CACHE_KEY)`, published by `Runtime` for the duration of the run — so an agent can never reach another user's schedules, and a run with no user identity gets an error result rather than an anonymous create. `create_schedule` uses `Session.current().id` as the originating session; `update_schedule` is full-replacement, matching the `PUT` route
+
+### Trigger contract
+
+The manager freezes one JSON body per task at create/amend time; the provider substitutes the
+occurrence placeholders (`TOKEN_REQUEST_ID`, `TOKEN_OCCURRENCE_TIME` in `model.py`) when it fires:
+
+```json
+{"prompt": "...", "agent": null, "user_id": "u1",
+ "session_id": "s1",                          // or "ak-sched-<task_id>-{ak.schedule.occurrence_time}"
+ "scheduled_task_id": "<task_id>",
+ "request_id": "{ak.schedule.request_id}",
+ "scheduled_time": "{ak.schedule.occurrence_time}"}
+```
+
+- **No `schedule` key**: an occurrence executes as a plain chat request, otherwise firing a schedule
+  would register another one.
+- **Metadata travels in the body, never in message attributes**: EventBridge Scheduler cannot set queue
+  message attributes, and the local provider deliberately matches that, so both providers exercise the
+  runners' body-fallback path (`pipeline/agent_runner.py`, the ECS/serverless `_get_record_attributes`).
+- `schedule`, `scheduled_task_id` and `scheduled_time` are all in `RequestBuilder`'s `known_fields`, so no
+  scheduling field ever reaches an agent as `AgentRequestAny` context.
+
+### Configuration (`_ScheduleConfig` in `config.py`)
+
+```yaml
+schedule:                 # presence enables the capability; a bare block works for local dev
+  provider:
+    type: local           # local (the only built-in today), or a dotted path to a ScheduleProvider
+  store:
+    type: in_memory       # in_memory (the only built-in today), or a dotted path to a ScheduleStore
+  agents: [planner]       # agents the schedule tools attach to; omitted = all agents
+```
+
+`local` and `in_memory` are the only short names the factory and builder accept: the `eventbridge`
+provider and the `redis`, `valkey` and `dynamodb` stores are planned (their config blocks are already
+declared in `config.py` but inert), so any other short name raises `AKConfigError` today. Store
+backends default to `ttl: 0` (unlike threads: a schedule must not silently expire) and the
+redis/valkey prefix to `ak:schedule:`. Note the same env-var failure mode threads have: any
+`AK_SCHEDULE__*` variable materializes the block and enables the capability with default backends.
+
 ## Knowledge Bases (`ak-py/src/agentkernel/knowledgebase/`)
 
 Pluggable storage backends agents can read from and write to as tools:
@@ -490,7 +561,7 @@ the cross-cutting CI: the live-broker `QueueTransportContract` job in `test-reus
 | `response_handler.py` | `ResponseHandler`: REST modes write records `{session_id, request_id, status_code, body}`; STREAM routing is by the WS-entered marker: no `USER_ID` attribute (REST-entered) -> chunks to `InMemoryResponseStore.add_chunk` for SSE, `USER_ID` present -> WebSocket push, as is all of ASYNC (`STREAM_CHUNK`/`CHAT_RESPONSE` via `PodPushWebSocketHandler`, targets resolved from the shared connection store); permanent failures deliver error frames/records so clients never hang |
 | `request_handler.py` | `RestHandler` (relocated; shim at `deployment/common/rest_handler.py` keeps the `AKConfig` patch target) with three default-preserving seams (`_effective_mode`, `_await_response_record`, `_build_sync_response`); the base polls full records (`get_record`) and honors the stored status for every queue-backed surface, ECS included: `>= 400` → `HTTPException`, `200 < status < 400` → `JSONResponse` (the 202 of a deferred chat), missing → 200; pipeline `RequestHandler`: always queue mode, unset mode → REST_SYNC, SSE bridging from `store.stream`, multipart route only on `in_memory` |
 | `response_store/` | Relocated family (`base`/`factory`/`redis`/`valkey`/`dynamodb`; shims left at `deployment/common/response_store.py` and `deployment/aws/core/response_store/`) plus `InMemoryResponseStore` (`get_record` exposes `status_code`; `add_chunk`/`stream` for local SSE) |
-| `io_handler.py` | `IOHandler.run(auth_validator=None)`: single-process topology (`in_memory`: rest-api + response-handler + agent-runner threads via `ThreadRunner`, co-hosting the gateway handlers in ASYNC/STREAM when a validator is passed) vs multi-process (broker: plain-REST rest-api + response-handler; `AgentRunner.run()` and `WebSocketGateway.run()` are their own containers); startup fail-fasts (ASYNC-on-in_memory without a validator, broker WS modes without `websocket_api.push_auth_token` or a shared connection store, broker transport + in_memory/absent response store -> `AKConfigError`). Serves via its own `uvicorn.Server` (`RESTAPI.build_app()` seam) and installs SIGTERM/SIGINT handlers on the main thread: set `shutdown_event`, `server.should_exit`, and `ThreadRunner.shutdown_exit_code = 0` (uvicorn only installs handlers on the main thread, and a container PID 1 with no handler never receives SIGTERM: the containerized e2e hang). `ConsumerLoop` slices fetch waits to <=1 s so drains are prompt |
+| `io_handler.py` | `IOHandler.run(auth_validator=None, handlers=None)` (`handlers`: app-mounted REST handlers served alongside the pipeline's own `RequestHandler()`): single-process topology (`in_memory`: rest-api + response-handler + agent-runner threads via `ThreadRunner`, co-hosting the gateway handlers in ASYNC/STREAM when a validator is passed) vs multi-process (broker: plain-REST rest-api + response-handler; `AgentRunner.run()` and `WebSocketGateway.run()` are their own containers); startup fail-fasts (ASYNC-on-in_memory without a validator, broker WS modes without `websocket_api.push_auth_token` or a shared connection store, broker transport + in_memory/absent response store -> `AKConfigError`). Carries no scheduling knowledge: the capability validates itself where its routes are mounted. Serves via its own `uvicorn.Server` (`RESTAPI.build_app()` seam) and installs SIGTERM/SIGINT handlers on the main thread: set `shutdown_event`, `server.should_exit`, and `ThreadRunner.shutdown_exit_code = 0` (uvicorn only installs handlers on the main thread, and a container PID 1 with no handler never receives SIGTERM: the containerized e2e hang). `ConsumerLoop` slices fetch waits to <=1 s so drains are prompt |
 | `ws/` | The WebSocket Gateway tier (spec §9). `base.py`: relocated `WebSocketConnectionStoreABC`/`WebSocketHandlerABC` (shim at `deployment/common/websocket_service.py`). `registry.py`: `LocalConnectionRegistry`, the gateway pod's own sockets (no TTL; `deliver_to_connection` writes one socket from worker threads via `run_coroutine_threadsafe`). `handler.py`: `PipelineWebSocketHandler`, the native `/ws` route (token query-param auth with `userId` claim, dual registry+store registration, chat frames enqueued directly to the transport with `REQUEST_ID`+`USER_ID` only, `CHAT_QUEUED` acks, custom routes via `PipelineWebSocketHandler.register(route)`). `endpoint.py`: `PushEndpointHandler`, `POST /internal/push` (the `PostToConnection` analogue; `x-ak-push-token` shared secret, per-connection targeting, 404 = GoneException analogue). `gateway.py`: `WebSocketGateway.run(auth_validator=...)`, the standalone gateway container main (broker-only: rejects the in_memory transport, naming the co-hosted `IOHandler` topology for local testing, and rejects REST modes; requires push token + shared store). The shared connection store itself is `WSConnectionStore` (`core/session/base.py`), provided per backend by `SessionStore.get_connection_store()` and resolved via `default_connection_store()` in `push.py`. `push.py`: `PodPushWebSocketHandler` (store-lookup delivery: one POST per connection to the owning pod; stale mappings cleaned on 404, all-gone raises for retry) and `pod_endpoint_url()` (`AK_POD_IP` -> resolved host -> loopback; `local` on `in_memory`). Lazy `__init__` keeps fastapi out of Lambda imports |
 | `thread_runner.py` | Relocated `ThreadRunner` (shim at `deployment/common/thread_runner.py` keeps `import os` for the `os._exit` patch target) |
 | `testing.py` | `QueueTransportContract`: reusable transport conformance suite (the `SandboxProviderContract` pattern); subclass it per transport |
@@ -650,6 +721,15 @@ ak-py/src/agentkernel/
 │   ├── testing.py           # FakeSandboxProvider + SandboxProviderContract (BYO test suite)
 │   ├── providers/           # local_subprocess, docker, e2b, daytona, ec2_ssm (+ planned: kubernetes, ...)
 │   └── broker/              # embedded, thread flavors + BrokerWorkerCore (+ planned: sqs)
+├── schedule/                # Scheduling capability (deferred + recurring chat execution)
+│   ├── model.py             # ScheduledTask, ScheduledTaskPage, ScheduleStatus, occurrence tokens
+│   ├── errors.py            # ScheduleError
+│   ├── manager.py           # ScheduleManager (validation, ownership, trigger bodies, recording)
+│   ├── timing.py            # OccurrenceCalculator (at/cron/timezone interpretation)
+│   ├── handler.py           # ScheduleRESTRequestHandler (management routes; lazily exported)
+│   ├── tools.py             # The five agent-facing system tools
+│   ├── provider/            # ScheduleProvider ABC + factory; local (+ planned: eventbridge)
+│   └── store/               # ScheduleStore ABC + builder; in_memory (+ planned: redis, valkey, dynamodb)
 ├── cli/                     # CLI interface
 │   └── cli.py               # Interactive CLI
 ├── auth/                    # Authentication

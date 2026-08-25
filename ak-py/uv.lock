@@ -97,6 +97,9 @@ crewai = [
     { name = "openinference-instrumentation-crewai" },
     { name = "openinference-instrumentation-litellm" },
 ]
+cron = [
+    { name = "croniter" },
+]
 daytona = [
     { name = "daytona" },
 ]
@@ -232,6 +235,7 @@ requires-dist = [
     { name = "chromadb", marker = "extra == 'chromadb'", specifier = ">=0.4.0" },
     { name = "confluent-kafka", marker = "extra == 'kafka'", specifier = ">=2.15.0" },
     { name = "crewai", marker = "extra == 'crewai'", specifier = ">=1.15.0" },
+    { name = "croniter", marker = "extra == 'cron'", specifier = ">=3.0" },
     { name = "datasets", marker = "extra == 'test'", specifier = ">=2.14.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.198.0,<0.199" },
     { name = "deprecated", specifier = ">=1.2.18" },
@@ -299,7 +303,7 @@ requires-dist = [
     { name = "valkey", marker = "extra == 'valkey'", specifier = ">=6.0.0" },
     { name = "walledai", marker = "extra == 'walledai'", specifier = ">=4.9.3" },
 ]
-provides-extras = ["auth", "langfuse", "openllmetry", "logfire", "crewai", "langgraph", "smolagents", "pydanticai", "cli", "aws", "azure", "redis", "valkey", "kafka", "nats", "thread", "agui", "neo4j", "chromadb", "trino", "openai", "adk", "walledai", "api", "slack", "whatsapp", "messenger", "instagram", "telegram", "teams", "gmail", "gcp", "test", "a2a", "mcp", "multimodal", "sandbox-docker", "e2b", "daytona"]
+provides-extras = ["auth", "langfuse", "openllmetry", "logfire", "crewai", "langgraph", "smolagents", "pydanticai", "cli", "aws", "azure", "redis", "valkey", "kafka", "nats", "thread", "agui", "cron", "neo4j", "chromadb", "trino", "openai", "adk", "walledai", "api", "slack", "whatsapp", "messenger", "instagram", "telegram", "teams", "gmail", "gcp", "test", "a2a", "mcp", "multimodal", "sandbox-docker", "e2b", "daytona"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1201,6 +1205,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d3/b6/776dd2ebd3709349ec5ecbaf7a0c5bab2e994da1058607992037aeb894ef/crewai_core-1.15.7.tar.gz", hash = "sha256:9eba945043b060455899d80272c7ca6f7a66f0ad25d30be85ba6e7e032434ef6", size = 23435, upload-time = "2026-07-26T18:20:48.522Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4f/47/c20955de87fd7302d854c48ad9d0c80d047687aa2f07ea1fe038cca34522/crewai_core-1.15.7-py3-none-any.whl", hash = "sha256:e01b80159121ba074edb3f7e5ba55a42e512c7247018d575b4730c8a00dc00a4", size = 30976, upload-time = "2026-07-26T18:20:47.462Z" },
+]
+
+[[package]]
+name = "croniter"
+version = "6.2.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/37/57/2e2a65aee2a70483cb28e2b7e15a072d00a523207593b44400d4717bb100/croniter-6.2.4.tar.gz", hash = "sha256:fc124f751b1b04805c2a04b061898b436b45ab2320b045e1e052ea895de65189", size = 166267, upload-time = "2026-07-10T09:52:59.955Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/ba/d678e5bd329646ca51d3c92addbc77804e86d21f4b6b6a027218e6abb010/croniter-6.2.4-py3-none-any.whl", hash = "sha256:8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d", size = 46677, upload-time = "2026-07-10T09:52:58.425Z" },
 ]
 
 [[package]]
