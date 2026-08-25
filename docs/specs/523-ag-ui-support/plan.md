@@ -58,14 +58,17 @@ step* waits on 4 and 5. Iteration 7 waits on all six.
 
 ## Iteration 1: The streaming contract (PR 1)
 
-- **Goal:** the event model exists, `Runner.stream` is typed for it, `StreamChunk` carries `event`,
-and nothing has changed behaviour — the adapters still yield `str` and the whole suite passes
-untouched.
-- **Files:** `core/events.py` (new), `core/model.py`, `core/base.py`, `core/runtime.py`,
+- **Goal:** the event model exists, `Runner.stream` is typed for it, and `StreamChunk` carries `event`.
+The adapters still yield `str`; the only externally visible change is the synthetic
+`message_start`/`message_end` frames on the streaming wire, recorded under Verify below.
+- **Files:** `core/event.py` (new), `core/model.py`, `core/base.py`, `core/runtime.py`, `core/__init__.py`,
 `framework/crewai/crewai.py`, `framework/smolagents/smolagents.py`,
-`tests/test_stream_events.py` (new), `tests/test_runtime_stream_events.py` (new)
+`tests/test_stream_events.py` (new), `tests/test_runtime_stream_events.py` (new),
+`examples/api/pydanticai-streaming/app_test.py`
 - **Steps:**
-  1. Add `core/events.py` — the twelve event classes and the `StreamEvent` discriminated union (§1).
+  1. Add `core/event.py` — the twelve event classes and the `StreamEvent` discriminated union (§1), and
+    export `StreamEvent` plus every member class from `core/__init__.py`. They are public API from PR 6
+     on, so the export ships with the classes rather than being owned by a later PR.
   2. Add `event: StreamEvent | None` to `StreamChunk`, after `delta` (§2). `delta` stays a plain
     settable field — **not** a computed field; §2 explains which existing test decides this.
   3. Add the `supports_streaming` **property** to `Runner` (default `True`) and widen `stream`'s
@@ -80,14 +83,27 @@ untouched.
   5. Write the two new test files. `test_runtime_stream_events.py` must assert hooks apply to the
     transitional `str` path and that reasoning never reaches `delta` — those two are the regression
      guards for step 4, and nothing in the current suite references `on_stream_chunk`.
-- **Verify:** `cd ak-py && uv run pytest` — green with **exactly one edit to an existing test**, and
-that edit is `tests/test_pipeline_request_handler.py`'s SSE wire-shape assertions. Any *other* edit
-means the projection in §4 is wrong.
+- **Verify:** `cd ak-py && uv run pytest` — green with **exactly two edits to existing tests**, and
+they are `tests/test_pipeline_request_handler.py`'s SSE wire-shape assertions and
+`examples/api/pydanticai-streaming/app_test.py`'s frame accumulation. Any *other* edit means the
+projection in §4 is wrong.
+  - **`uv run pytest` in `ak-py` is not sufficient on its own.** It does not run example tests, so a
+    green `ak-py` suite is not evidence that the examples are green. The second edit was found by the
+     nightly `api` matrix entry `examples/api/pydanticai-streaming`
+     (`.github/test-config.yaml:104`), not locally. Also run
+     `grep -rn '\["delta"\]' examples --include="*.py"` before opening the PR.
   - **The original "zero edits" gate does not hold, and the reason matters.** The transitional branch
     adds two frames to every stream — a `message_start` at the head and a `message_end` at the tail,
      both carrying no `delta` — and `TestStreamSSE::test_stream_yields_sse_chunks` asserts
      `frames[0]` is the first text frame. §4's own design requires those frames, so the test's
      expectation is what is stale, not the implementation.
+  - **The example failure is the same cause with a harder edge.** `app_test.py:79` did
+    `"".join(f["delta"] for f in frames[:-1])` — unguarded — so it raises `KeyError: 'delta'` on the
+     leading `message_start` frame rather than degrading quietly. It is fixed by filtering on the
+     key's presence (`for f in frames if "delta" in f`), which is correct in both the transitional
+     and the end state. The rewrite also adds assertions that `delta` and `event["content"]` agree
+     and that boundary frames exist — the only end-to-end check anywhere that §4's projection holds
+     through a real adapter and a real HTTP surface.
   - **Why §4 missed it:** the three files it names as the compatibility claim (§ *Existing test files
     that must NOT change*) all inject `StreamChunk`s into a fake service and never reach
      `Runtime.stream`, so none of them could have caught this. `test_pipeline_request_handler.py` is
@@ -207,7 +223,11 @@ full suite.
   4. **Only once iterations 4 and 5 have merged:** delete the transitional `str` branch from
     `Runtime.stream`, and add a test asserting a `str`-yielding runner now fails loudly — the
      assertion is the pydantic `ValidationError` from `StreamChunk.event` rejecting a bare `str`
-     (§4 rule 6), not merely an absence of output.
+     (§4 rule 6), not merely an absence of output. **Narrow `Runner.stream`'s annotation from
+     `AsyncGenerator[StreamEvent | str, None]` back to `AsyncGenerator[StreamEvent, None]`** in the
+     same step (§3) — the union is transitional scaffolding and becomes permanent by omission if this
+     is missed. The trailing bare `yield` in the base body **stays**: it is what makes the method an
+     async generator rather than a coroutine, and is unrelated to the transition.
   5. **Migrate the three test doubles the deletion breaks**, none of which appear in §*Existing test
     files that change*: `tests/test_runtime.py:756-759` (the `Agent.current()`-during-stream double),
      `tests/test_chat_service_core.py:257-259` (acting-user propagation) and
@@ -261,11 +281,29 @@ all; see the header for why it cannot be distributed backwards.
      over AG-UI and why (`design.md:687-691`). Also the `thread_id`→`session_id` note, the ignored
      `tools` non-goal, `forwardedProps` being read-only and pull-based, and AG-UI state's session
      lifetime.
-  6. **The breaking-change note** — see below; it ships here rather than as a docs page.
-- **Verify:** no test gate; this PR touches no code. Instead: `grep -ri "transitional\|token delta\|
-AsyncGenerator\[str" docs/docs .agents/skills` returns nothing, and every `path:line` in the
-inventory below has been visited. Confirm `docs/sidebars.js` lists the new AG-UI page — the sidebar
-enumerates pages explicitly rather than autogenerating, so a new `.md` file alone is invisible.
+  6. **Example READMEs — five of them, and this surface was absent from the inventory entirely.**
+    Every one shows a literal SSE or `STREAM_CHUNK` payload that is now incomplete. They are owned
+     here rather than by PRs 1-3 for the usual reason plus a sharper one:
+     `examples/api/pydanticai-streaming/README.md` is invalidated **twice** — its frame samples by
+     PR 1, and lines 5-7, which name `run_stream()` / `stream_text(delta=True)` as what drives the
+     stream, by PR 6's replacement of both with `run_stream_events()`. It cannot be written correctly
+     until PR 6 exists.
+  7. **Three pre-existing inaccuracies, fixed while in the neighbourhood.** All three show a terminal
+    frame that carries a `delta`, which has never been true of any version of this code:
+     `docs/docs/api/rest-api.md:353`, `docs/docs/deployment/aws-serverless.md:911`, and
+     `examples/aws-serverless/streaming-openai/README.md:126`. Unrelated to #523; cheap to correct
+     here and misleading to leave beside newly-corrected samples.
+  8. **The breaking-change note** — see below; it ships here rather than as a docs page.
+- **Verify:** no test gate; this PR touches no code. Instead:
+  - `grep -ri "transitional\|token delta\|AsyncGenerator\[str" docs/docs .agents/skills` returns
+    nothing, and every `path:line` in the inventory below has been visited.
+  - `grep -rn 'data: {"delta"\|"delta": ' docs/docs examples` — every remaining hit shows the frame
+    shape *with* `event`, and no sample shows a terminal frame carrying a `delta`.
+  - `docs/sidebars.js` lists the new AG-UI page. The sidebar enumerates pages explicitly rather than
+    autogenerating, so a new `.md` file alone is invisible in the nav.
+  - **`docs/versioned_docs/**` is out of scope** — eighteen frozen snapshots, several containing the
+    old frame shape. They document released versions where that shape was correct, so changing them
+     would make the archive wrong rather than right.
 
 ---
 
@@ -304,9 +342,32 @@ and is retained only to make that uniformity explicit rather than accidental.
 | `docs/sidebars.js` | `tutorialSidebar` → `Advanced` category | add the new AG-UI page. The sidebar enumerates every page explicitly rather than autogenerating from the filesystem, so a new `.md` file alone is invisible in the nav | PR 7 |
 | `advanced/threads.md` | — | verified: no change. It documents the `Authoriser` AG-UI now shares, but AG-UI adds no thread behaviour | — |
 
-Every row is PR 7. Two of them (`architecture/overview.md`, `core-concepts/runtime.md`) were absent
-from this table until implementation of PR 1 found them: both describe `Runtime.stream`'s loop, and
-neither contains the strings the original search looked for.
+**Examples** (`examples/`) — **this whole surface was missing from the inventory** until PR 1's CI run
+failed on the first row. Located by `grep -rln 'data: {"delta"\|"delta": ' examples`:
+
+| File | Line | What changes | Owner |
+|---|---|---|---|
+| `examples/api/pydanticai-streaming/README.md` | 35-44 | the SSE frame samples gain `event` and the boundary frames. **Also 5-7**: names `run_stream()` / `stream_text(delta=True)` as what drives the stream, which PR 6 replaces — invalidated twice, and the reason this table cannot be split across PRs | PR 7 |
+| `examples/api/openai/README.md` | 92-94 | the `curl -N` sample output | PR 7 |
+| `examples/aws-containerized/openai-stream/README.md` | 71-74 | `STREAM_CHUNK` samples | PR 7 |
+| `examples/aws-containerized/openai-stream-queue-mode/README.md` | 80-83 | `STREAM_CHUNK` samples | PR 7 |
+| `examples/aws-serverless/streaming-openai/README.md` | 124-126 | `STREAM_CHUNK` samples, **and** line 126 shows a terminal frame carrying a `delta` — a pre-existing error | PR 7 |
+| `examples/api/pydanticai-streaming/app_test.py` | 79 | **not PR 7 — PR 1.** A test, not a doc; it ships with the behaviour that breaks it. Listed here so the row is not mistaken for an omission | PR 1 |
+| the other three `mode: stream` examples' test files | — | verified: none exists. Only `pydanticai-streaming` has an `app_test.py` that asserts on frames | — |
+| example JS/HTML frontends | — | verified: no change. Zero matches for `.delta` in any example's `.html` or `.js` | — |
+
+Every row is PR 7 apart from the one example *test*, which is PR 1's. Three docs rows and the entire
+Examples table were absent until implementation of PR 1 found them:
+`architecture/overview.md` and `core-concepts/runtime.md` both describe `Runtime.stream`'s loop but
+contain none of the strings the original search looked for, and `examples/` was never searched at all.
+
+**The pattern in all three misses is the same**, and it is worth stating once rather than three times:
+the inventory was built by grepping for the *identifiers* the change touches (`StreamChunk`,
+`Runner.stream`, `delta`) inside the *directories* assumed to hold documentation (`docs/docs`,
+`.agents/skills`). It missed prose that describes the behaviour without naming the identifier, and it
+missed documentation living next to code. A wire-format change should instead be inventoried by
+searching for the *shape* — here `grep -rn '"delta"' --include="*.md" --include="*.py" .` across the
+whole repository — which finds all of them in one pass.
 
 **Verified as needing no change**, by search rather than assumption — zero matches for `StreamChunk`,
 `Runner.stream` or `delta` in either:
