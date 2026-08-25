@@ -58,22 +58,22 @@ WebSocket / MCP / A2A is the opposite direction, and satisfies the principle tha
 
 ## Architecture
 
-A run is served inline: the handler calls the `ChatService` execution core, and encodes each event
-as it arrives.
+A run is served inline: the handler uses `ChatService.prepare_agent_handler` (select + load), writes onto that
+session, streams via `AgentHandler.run_stream_async`, and encodes each event as it arrives.
+(`execute_stream` is still unused — it hides the session; see Execution.)
 
 ```mermaid
 flowchart LR
     UI["Web UI"]
     H["AG-UI handler<br/><i>integration/agui</i>"]
-    CS["ChatService<br/>execute_stream"]
-    RT["Runtime<br/><i>pre-hooks · runner · post-hooks</i>"]
+    CS["ChatService.prepare_agent_handler"]
+    RT["Runtime.stream<br/><i>pre-hooks · runner · post-hooks</i>"]
 
     UI -- "POST RunAgentInput" --> H
-    H -- "calls" --> CS
-    CS --> RT
-    RT -. "event objects" .-> CS
-    CS -. "AG-UI events" .-> H
-    H -. "SSE event stream" .-> UI
+    H -- "prepare_agent_handler" --> CS
+    CS -- "run_stream_async" --> RT
+    RT -. "StreamChunk.event" .-> H
+    H -. "SSE event stream<br/><i>AGUIMapper.to_agui</i>" .-> UI
 ```
 
 
@@ -128,9 +128,10 @@ SDK's `EventEncoder` and typed from `encoder.get_content_type()` rather than a h
   "negotiated from the request's `Accept` header"; that describes the SDK's intent, not its
   behaviour. AK still routes through the encoder — it owns the wire framing, and AK inherits real
   negotiation for free if the SDK ever implements it — but the surface replies SSE either way.
-- Translation is a **pure function**, `to_agui(event)` in `integration/agui/mapping.py`: a branch per
-AK event discriminator, returning `None` where AG-UI has no equivalent. No class, no state — the
-event model carries the boundaries that would otherwise have to be inferred.
+- Translation is a **pure function**, `AGUIMapper.to_agui(event)` in `integration/agui/mapping.py`: a
+branch per AK event discriminator, returning `None` where AG-UI has no equivalent. A namespace class
+of static methods, no instance state — the event model carries the boundaries that would otherwise
+have to be inferred.
   - Spelled as a discriminator chain rather than a lookup dict, matching how every adapter already
   translates a typed union into another vocabulary (`framework/openai/openai.py:108-140`). Several
   branches need more than one line, which a dict of type-to-type would fight.
@@ -373,8 +374,20 @@ and the `framework_context` store must still run only after the stream drains no
 
 ### Execution
 
-- The handler always streams. It calls the `ChatService` execution core (`execute_stream`) and
-encodes each event as it arrives.
+- The handler always streams. It uses `ChatService.prepare_agent_handler` to select the agent and load the session,
+  writes AG-UI fields onto that session, then streams via `AgentHandler.run_stream_async` and encodes
+  each event as it arrives.
+  - **This revises an earlier requirement in this document**, which first routed the run through
+  `ChatService.execute_stream`, then reversed to `Runtime.stream` directly. `execute_stream` hides
+  the session it loaded, and AG-UI has to write `state` / `forwardedProps` / `context` onto that
+  object *before* the run and read state back *after* — so going through `execute_stream` meant a
+  second `load()` under persistent stores, and `get_forwarded_props()` returning `{}`. `prepare_agent_handler` is
+  the select-and-load step `execute_stream` already does, returned so AG-UI can write in between.
+  The handler still owns the AG-UI run lifecycle (`RunStarted`, exactly one terminal event, the
+  change-only `StateSnapshot`) rather than inheriting `ChatService`'s error-chunk shape.
+  - Do not pass a pre-loaded `session=` into `execute_stream`: that would keep object identity but
+  leave the handler calling `Runtime.sessions().load` itself, which is the layering the review
+  asked to stop.
 - **AG-UI does not read or require** `execution.mode`**.** Its routes are its own, so it neither
 consults the process-wide mode nor forces it to `stream`.
   - `Runtime.stream` and the adapters' `Runner.stream` are independent of that setting — it selects
@@ -448,8 +461,8 @@ and reaches the agent through a read-only `get_forwarded_props()` system tool.
   - **The volatile cache is the right home**, not a new `Session.Keys` member. `forwardedProps` is
   per-request by nature — AG-UI re-sends it on every run, so a previous copy is never wanted — and
   `Runtime` already clears the volatile cache after every run (`core/runtime.py:229-230`). The
-  correct lifetime comes for free, with nothing extra to document about expiry. Contrast
-  `agui_state`, which earns a top-level key precisely because it must survive the run.
+  Correct lifetime comes for free, with nothing extra to document about expiry. Contrast
+  `agui_state`, which lives in the **non-volatile cache** precisely because it must survive the run.
   - **Reached by tool, not by injection, and that is the safer shape** — the same call this design
   already makes for `RunAgentInput.context` above, which is fed to the model as tool output rather
   than as instructions. Client data should arrive where the model treats it as information, not as
@@ -471,7 +484,7 @@ and reaches the agent through a read-only `get_forwarded_props()` system tool.
   failure mode below — a client sends the field, gets no error, and the context silently never
   reaches the agent.
 - `RunAgentInput.state` is a distinct concept from `forwardedProps` — different lifetime, and it has
-a return path — and lands in its own top-level session key. See State.
+a return path — and lands in the **non-volatile cache**. See State.
 
 
 
@@ -479,8 +492,8 @@ a return path — and lands in its own top-level session key. See State.
 
 - `RunAgentInput.state` is accepted, and `StateSnapshot` is emitted. `StateDelta` is deferred to a
 follow-up, for the reasons at the end of this section.
-- AG-UI state lives in **its own session key**, a new `Session.Keys.AGUI_STATE`, not in
-  `framework_context`.
+- AG-UI state lives in the **non-volatile cache** under `AGUI_STATE_KEY = "agui_state"` (defined in
+  `integration/agui/state.py`), not in `framework_context` and not as a new `Session.Keys` member.
   - The security reason is the general one stated under Identity and request handling: no
     client-supplied field enters `framework_context`, because `state` arrives from the browser and
     `framework_context` is what the application set and its tools trust. `state` is simply one of
@@ -500,22 +513,25 @@ follow-up, for the reasons at the end of this section.
   - The ownership reason: they are different concepts sharing a shape. `framework_context` is
     *caller* context; `agui_state` is the *UI's*. An application already keeping tenant data in
     `framework_context` must not collide with AG-UI writing form state into the same dict.
-  - This is one more named compartment inside the existing session record, not a second session or a
-    second store entry — the same way each framework adapter already keeps its state under its own
-    key.
-- The session key and the tool functions live in **core**, and are **named for AG-UI anyway**.
-  - Placement is forced by coupling: `SystemToolFactory.get_all()` (`core/tool.py:178-200`) lazily
-    imports each capability's tools. A tool under `integration/agui/` would make `core/` import an
-    integration, breaking the dependency-leaf rule AG-UI otherwise honours. The code has to sit in
-    `core/`; that is not a choice.
-  - The **name** is a choice, and it is `agui_state` rather than something surface-neutral. Nothing
-    but AG-UI populates this key, and a neutral name would advertise a generality that does not
-    exist — the same reasoning that put the config under `agui` rather than at the top level.
-    Naming it honestly beats naming it aspirationally.
-  - Accepted consequence: `core/` now contains an identifier that names an integration. That is a
-    weaker version of what `AKConfig` already does with `slack`, `whatsapp` and the rest
-    (`core/config.py:696-702`), and it is a rename away from being wrong if a second surface ever
-    wants the capability — which is a cheap problem to have later, versus a misleading name now.
+  - **Why nv_cache rather than a reserved `Session.Keys` member.** Sandbox, WalledAI and multimodal
+    already stash durable per-session data in `nv_cache` behind a string key. Adding `AGUI_STATE` to
+    `Session.Keys` and `get/set/clear_agui_state` on `Session` would poison core with an
+    integration-specific API. The non-volatile cache is persisted with the session (`Runtime` does
+    not clear it), so the lifetime matches a top-level key without naming AG-UI on `Session`.
+- The cache keys and the tool functions live in **`integration/agui/state.py`**, and are
+  **named for AG-UI**: the tools, the prompt sections, `AGUI_STATE_KEY` plus the two volatile-cache
+  keys, and the `agui.state` / `agui.client_context` blocks that gate them. AG-UI is the only surface
+  that populates any of it, and naming these for the thing they actually do beats naming them for a
+  generality no second surface has asked for. A cache-key value is persisted with the session, which
+  makes the storage name a migration to change.
+  - **Placement:** the module sits with the AG-UI integration, not under `core/`. Putting an
+    AG-UI-named module in `core/` read as a layering breach in the directory listing; keeping it in
+    `integration/agui/` matches ownership. `SystemToolFactory.get_all()` lazy-imports it the same
+    way it already reaches outside core for sandbox (`from ..sandbox.tools import ...` /
+    `from ..integration.agui.state import AGUIState`).
+  - A wider rename — capability names for the tools, prompt sections, cache keys and config too —
+    was implemented and then **reverted**. Recorded so it is not re-proposed: the tools genuinely do
+    AG-UI work, so protocol-neutral names described them less accurately, not more.
 - Agent-facing surface is **system tools**, following multimodal's `AnalyzeAttachmentsTool` and
   sandbox's eight:
   - `get_agui_state()` returns the current dict.
@@ -526,14 +542,14 @@ follow-up, for the reasons at the end of this section.
       (`core/tool.py:186-200`): `_agent_allowed(config, agent_name)` reads exactly `enabled` and
       `agents`. `agui.client_context` gets its own branch of the same shape.
     - **Two flags, not one.** `agui.state` commits to mutation and to emitting `StateSnapshot`;
-      `client_context` only ever reads inbound fields — `forwardedProps` and `context` — and never
+      `agui.client_context` only ever reads inbound fields — `forwardedProps` and `context` — and never
       writes. An application may reasonably want the second without the first, and one combined flag
       would stop each flag meaning one thing.
     - Nested under `agui` rather than given a top-level block because the capability exists to serve
       AG-UI and nothing else turns it on. `core/` reading an integration's config **section** is not
       a coupling breach — the rule is about imports, and `AKConfig` already defines every
       integration's section (`core/config.py:696-702`). Only the short registration branches name
-      `agui`; the keys and the functions do not.
+      `agui`; the tool names and the prompt sections do not.
     - **It cannot instead follow "AG-UI is mounted."** Mounting the handler is what enables AG-UI and
       there is deliberately no `enabled` flag (see AG-UI surface), so there is no such signal in
       config. Mounting also happens in application code, potentially after agents are registered —
@@ -548,15 +564,15 @@ follow-up, for the reasons at the end of this section.
     the intended explicit opt-in; and setting `enabled: True` **without** mounting AG-UI puts the
     tools on every agent for nothing.
 - **The owner is always named, but only where it has to be** — `agui.state` in config,
-  `Session.Keys.AGUI_STATE` in the session, `get_agui_state` / `update_agui_state` as tools.
+  `AGUI_STATE_KEY` in the non-volatile cache, `get_agui_state` / `update_agui_state` as tools.
   - AG-UI calls the concept *shared state*. AK deliberately does not: a bare `shared_state` says
     nothing about **whose** state it is or what it is shared *with*, and beside `session`,
     `execution` and `multimodal` it reads as a general-purpose store it is not. That AG-UI uses the
     generic term is not a reason for AK to inherit it.
   - The config key is plain `state` because the `agui` block already supplies the owner —
     `agui.agui_state` stutters, and the objection to a bare `state` was that it is generic at *top*
-    level, which nesting removes. The session key and the tools are not nested and carry no such
-    parent, so they spell it out: `AGUI_STATE`, `get_agui_state`, `update_agui_state`.
+    level, which nesting removes. The cache key and the tools are not nested and carry no such
+    parent, so they spell it out: `agui_state`, `get_agui_state`, `update_agui_state`.
   - The rule, so a reviewer does not read the difference as an inconsistency: **name the owner
     exactly once per identifier.** The config path says it in the block; the key and the tools say it
     in themselves.
@@ -566,7 +582,7 @@ follow-up, for the reasons at the end of this section.
 
   | Field | Stored | Agent reaches it via | Lifetime |
   |---|---|---|---|
-  | `state` | `Session.Keys.AGUI_STATE` | `get_agui_state` / `update_agui_state` | survives the run |
+  | `state` | non-volatile cache, `AGUI_STATE_KEY` | `get_agui_state` / `update_agui_state` | survives the run |
   | `forwardedProps` | volatile cache, reserved key | `get_forwarded_props` | cleared after the run |
   | `context` | volatile cache, reserved key | `get_agui_context` | cleared after the run |
   | `tools` · `messages` · system prompts | nowhere | — | documented non-goals |
@@ -584,10 +600,10 @@ follow-up, for the reasons at the end of this section.
   - *Holding it during the run* is unavoidable. `update_agui_state` writes somewhere and
     `get_agui_state` reads it back; the session is the only place available.
   - *Keeping it afterwards* is what is being chosen. `Runtime` clears only the volatile cache
-    (`core/runtime.py:229-230`) and stores the whole session, so a top-level key persists
-    automatically — the same reason `framework_context` does. **Not** persisting would take extra
+    (`core/runtime.py:229-230`) and stores the whole session, so an `nv_cache` entry persists
+    automatically — the same reason other durable cache keys do. **Not** persisting would take extra
     code.
-  - The decision: `AGUI_STATE` is a top-level key and **does** persist. The alternative — putting
+  - The decision: state lives in **nv_cache** and **does** persist. The alternative — putting
     it in the volatile cache, cleared every run — is the purer reading of the protocol, since the
     client owns state and re-sends it each request, and it would make the "absent `state` must not
     clobber" rule moot because nothing would be stored to clobber.
@@ -714,6 +730,14 @@ purpose is driving a user interface is not demonstrated by test assertions alone
   - **One static HTML file, no build step**: vanilla JS against the SSE endpoint, no `package.json`,
   no `node_modules`, no lockfile to maintain. The original objection was to introducing a
   JavaScript build into a Python repository, not to the demo itself.
+    - **This requirement was reversed during PR 3.** The example ships as a Vite + React +
+    TypeScript app with a committed `package-lock.json`. A single file with runtime-compiled
+    templates turned out to be React in name only — no components to read, no JSX, and nothing
+    testable — so the event stream could not be exercised in isolation. The build is optional:
+    `build.sh` installs Python only; the UI is `npm run dev` (or an optional `npm run build` served
+    at `GET /`). No CI job installs Node for this example, which preserves what the original
+    objection was protecting.
+    See `plan.md` iteration 3 for the full reasoning and the measurements behind it.
   - It must render a tool call live, not just streamed text — that is precisely what AK's existing
   REST SSE surface cannot show, and therefore what the example exists to prove.
   - It must also demonstrate a **state round-trip**: send `state`, have the agent mutate it through
@@ -752,18 +776,30 @@ than rejected, so a frontend newer than the server still runs.
 
 ## Delivery
 
-The six PRs are **review units, not release units** — they merge together and ship as a single AK
+The seven PRs are **review units, not release units** — they merge together and ship as a single AK
 release. The ordering exists so each is reviewable on its own, and two independent roots allow
 parallel progress.
+
+**This reverses an earlier requirement in this document**, which planned six PRs with the
+documentation riding in PR 3. Docs became PR 7 for a structural reason rather than a scheduling one:
+`design.md` requires a per-adapter fidelity matrix stating which events each adapter can fill, and PRs
+4-6 are what make them fillable — so PR 3 would have owned a document whose content is decided by the
+three PRs after it. Two further consequences were verified rather than predicted: docs written at PR 1
+would describe the transitional `str` tolerance that PR 6 deletes before anything reaches `develop`,
+and the surface inventory turned out to be incomplete. `plan.md`'s header carries all four reasons.
+Because the stack merges as one release, a trailing docs PR still satisfies the rule that no merged PR
+leaves the docs describing behaviour it changed — but PR 7 is a **hard condition on the merge**, not a
+follow-up.
 
 | PR | Scope | Green gate | Depends on |
 |---|---|---|---|
 | 1 | **The streaming contract.** Event types with boundaries, widened `Runner.stream`, the additive `StreamChunk.event` field and the `delta` projection, plus `Runner.supports_streaming` (default `True`, declared `False` on `CrewAIRunner` and `SmolagentsRunner`). `ResponseBuilder` and the thread recorder are untouched, and `Runtime.stream` accepts `str | StreamEvent` transitionally so the adapters keep working. No adapter emits an event object yet; `Runtime.stream` synthesizes them from `str` until PR 6 | existing suite green, **zero test edits**; new tests assert all six runners declare honestly | — |
 | 2 | **Attachment source forms.** `_extract_attachment` classifies the source and splits `data:` URIs; the filter loop retains URL-sourced requests it did not consume. Shared multimodal code, no AG-UI in it | new tests across all five source forms; existing suite unchanged | — |
-| 3 | **The integration.** `integration/agui/` package, handler and routes (on the shared `AuthorisedRESTRequestHandler` and `Authoriser` — no AG-UI authoriser of its own), discovery, `to_agui` mapping and its exhaustiveness test, attachment mapping (no normalization — see PR 2), `Session.Keys.AGUI_STATE` with its accessors and the four system tools, `SystemToolFactory` branches, `StateSnapshot` emission, `forwardedProps` and `context` → volatile cache, the `agui` config block, the `agui` extra pinned `>=0.1.16`, single-file example frontend, docs | new tests pass | PR 1, PR 2 |
+| 3 | **The integration.** `integration/agui/` package, handler and routes (on the shared `AuthorisedRESTRequestHandler` and `Authoriser` — no AG-UI authoriser of its own), discovery, `to_agui` mapping and its exhaustiveness test, attachment mapping (no normalization — see PR 2), AG-UI state in `nv_cache` plus the four system tools, `SystemToolFactory` branches, `StateSnapshot` emission, `forwardedProps` and `context` → volatile cache, the `agui` config block, the `agui` extra pinned `>=0.1.16`, the example frontend (Vite + React + TypeScript — see the reversal above) | new tests pass | PR 1, PR 2 |
 | 4 | **OpenAI and LangGraph.** Both already iterate their framework's full event stream with explicit boundaries; both stop discarding | per-adapter tests | PR 1 |
 | 5 | **Google ADK.** Stop skipping non-partial events, plus the in-adapter derivation of message start from `partial` | per-adapter tests, including the derivation | PR 1 |
 | 6 | **Pydantic AI, and the end of the transition.** Rewrite `stream` onto `run_stream_events()`, re-plumbing session-message bookkeeping and the `framework_context` store. Also carries the **final step**: deleting the transitional `str` tolerance PR 1 added to `Runtime.stream` | per-adapter tests; `framework_context` round-trip unchanged; **tolerance removed and a test asserts a `str`-yielding runner now fails** | PR 1 (adapter work); PRs 4 and 5 merged (final step only) |
+| 7 | **Documentation and skills.** Every docs and skills surface describing the end state: the streaming contract, the SSE wire shape, the tool-call redaction limit, attachment source forms, the new AG-UI page carrying the **per-adapter fidelity matrix**, and five example READMEs. Writes nothing about the transition, which never reaches `develop` | docs build; no surface left describing the old contract | PRs 1-6, all merged |
 
 Shape of the graph:
 
@@ -774,8 +810,8 @@ Shape of the graph:
   - *Capability declaration folded into PR 1.* `supports_streaming` is one line per adapter plus a
   base-class default. It was separated to keep the integration PR small, but a six-line change is
   not a review unit — and it belongs with the streaming contract it declares.
-  - *The state capability folded into PR 3.* It was separate while the session key and tools were
-  surface-neutral. Naming them `agui_state` (see State) settled that they are not: the key, the
+  - *The state capability folded into PR 3.* It was separate while storage and tools were
+  surface-neutral. Naming them `agui_state` (see State) settled that they are not: the cache key, the
   tools and the config all say AG-UI, so reviewing them apart from AG-UI bought nothing. This
   removes the awkwardness of a PR whose config belonged to a feature it was not allowed to mention.
 - **The adapter work stays split three ways because the work differs in kind, not just in file.**

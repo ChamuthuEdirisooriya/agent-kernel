@@ -1,0 +1,148 @@
+"""AG-UI example tests. Requires OPENAI_API_KEY."""
+
+import asyncio
+import json
+import subprocess
+import sys
+import uuid
+
+import httpx
+import pytest
+import pytest_asyncio
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+TOKEN = "demo-token"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def base_url():
+    proc = subprocess.Popen(
+        ["python3", "app.py"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
+    await asyncio.sleep(5)
+    try:
+        yield "http://localhost:8000"
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+def run_input(prompt: str, thread_id: str, state=None, context=None) -> dict:
+    return {
+        "threadId": thread_id,
+        "runId": str(uuid.uuid4()),
+        "state": state,
+        "messages": [{"id": str(uuid.uuid4()), "role": "user", "content": prompt}],
+        "tools": [],
+        "context": context or [],
+        "forwardedProps": None,
+    }
+
+
+async def collect(url: str, payload: dict, path: str = "/agui") -> list[dict]:
+    events: list[dict] = []
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        async with client.stream("POST", f"{url}{path}", json=payload, headers=AUTH) as response:
+            response.raise_for_status()
+            assert response.headers["content-type"].startswith("text/event-stream")
+            async for line in response.aiter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[len("data:") :].strip()))
+    return events
+
+
+@pytest.mark.asyncio
+async def test_discovery_lists_the_streaming_agent(base_url):
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(f"{base_url}/agui/agents", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"agents": ["planner"]}
+
+
+@pytest.mark.asyncio
+async def test_routes_reject_a_missing_or_bad_token(base_url):
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        assert (await client.get(f"{base_url}/agui/agents")).status_code == 401
+        bad = {"Authorization": "Bearer nope"}
+        assert (await client.post(f"{base_url}/agui", json=run_input("hi", "t"), headers=bad)).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_the_asset_route_serves_nothing_outside_assets(base_url):
+    """Percent-encode `..`; httpx would otherwise normalise `/assets/..` to `/`."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for path in ("/assets/%2e%2e", "/assets/nope.js"):
+            assert (await client.get(f"{base_url}{path}")).status_code == 404, path
+
+
+@pytest.mark.asyncio
+async def test_run_lifecycle_brackets_the_response(base_url):
+    events = await collect(base_url, run_input("Say hello in five words.", str(uuid.uuid4())))
+    types = [event["type"] for event in events]
+
+    assert types[0] == "RUN_STARTED"
+    assert types[-1] == "RUN_FINISHED"
+    assert types.count("RUN_STARTED") == 1
+    assert types.count("RUN_FINISHED") + types.count("RUN_ERROR") == 1
+
+    assert "TEXT_MESSAGE_START" in types and "TEXT_MESSAGE_END" in types
+    text = "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
+    assert text.strip()
+
+    message_ids = {e["messageId"] for e in events if e["type"].startswith("TEXT_MESSAGE_")}
+    assert len(message_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_named_agent_route_works_too(base_url):
+    events = await collect(base_url, run_input("Say hi.", str(uuid.uuid4())), path="/agui/planner")
+    assert events[0]["type"] == "RUN_STARTED"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_agent_is_404(base_url):
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(f"{base_url}/agui/nobody", json=run_input("hi", "t"), headers=AUTH)
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_audio_content_is_rejected_before_the_stream_opens(base_url):
+    payload = run_input("listen", str(uuid.uuid4()))
+    payload["messages"][0]["content"] = [
+        {"type": "audio", "source": {"type": "data", "value": "AAA", "mimeType": "audio/mpeg"}}
+    ]
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(f"{base_url}/agui", json=payload, headers=AUTH)
+    assert response.status_code == 400
+    assert "audio" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_state_round_trip(base_url):
+    thread_id = str(uuid.uuid4())
+
+    events = await collect(
+        base_url, run_input("Add exactly one task titled 'milk' to my task list.", thread_id, state={"tasks": []})
+    )
+    snapshots = [e for e in events if e["type"] == "STATE_SNAPSHOT"]
+    assert snapshots, f"expected a StateSnapshot after the agent updated the state; got {[e['type'] for e in events]}"
+
+    titles = [task["title"] for task in snapshots[-1]["snapshot"]["tasks"]]
+    assert any("milk" in title.lower() for title in titles), titles
+
+    quiet = await collect(base_url, run_input("Just say ok.", thread_id, state=snapshots[-1]["snapshot"]))
+    assert not [e for e in quiet if e["type"] == "STATE_SNAPSHOT"]
+
+
+@pytest.mark.asyncio
+async def test_client_context_reaches_the_agent_as_tool_output(base_url):
+    context = [{"description": "the user's favourite colour", "value": "vermilion"}]
+    prompt = "Check the context the frontend attached, then tell me my favourite colour."
+    events = await collect(base_url, run_input(prompt, str(uuid.uuid4()), context=context))
+    text = "".join(e["delta"] for e in events if e["type"] == "TEXT_MESSAGE_CONTENT")
+    assert "vermilion" in text.lower(), text
