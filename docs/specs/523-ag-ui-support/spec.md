@@ -776,13 +776,45 @@ The four adapters already respect this — `incoming`, `produced` and `context` 
 cross-session bug rather than a crash:
 
 **Two separate questions, which an earlier draft of this section conflated:** where a *correlation id*
-comes from, and whether a *message boundary* has to be derived. Three adapters need no memory for the
-first; two need it for the second.
+comes from, and whether a *message boundary* has to be derived. Two adapters need no memory for the
+first (OpenAI and LangGraph, which read an id off the event); two derive boundaries for the second
+(ADK and LangGraph).
 
-- **Correlation ids are read off the framework's own events in three adapters** — OpenAI from its
-  stream item's `id`, LangGraph from `run_id`, Pydantic AI from `PartStartEvent.index`. PRs 4 and 6
-  must take that route rather than generating and storing ids. ADK has no id to read and must generate
-  one.
+- **Correlation ids are read off the framework's own events wherever one exists** — OpenAI from its
+  stream item's `id`, LangGraph from `run_id`. Pydantic AI reads `part.id` for a text or thinking part
+  and `tool_call_id` for a tool call, generating only when the provider supplies no `part.id`, and it
+  stores what it allocates (see below). ADK has no id to read for a message and must generate one; its
+  tool calls read `FunctionCall.id`. **Never generate where the framework supplies one**: a generated
+  id cannot correlate a result to the call that produced it.
+  - **Corrected at PR 6: `PartStartEvent.index` is not usable as an id, so Pydantic AI needs memory
+    too.** `index` is the part's position *within one response*, and the SDK states that a repeated
+    index **replaces** the part rather than continuing it. A run that calls a tool and then answers
+    restarts at 0, so two unrelated messages would collide on one id and any AG-UI client would splice
+    them into one bubble. The adapter keeps an `open_parts: dict[int, tuple[str, str]]` **local**
+    mapping each live index to the AK id it opened with: a text or thinking part takes the provider's
+    `part.id` when there is one and a generated id otherwise, while a tool call takes its own
+    `tool_call_id`, which is never generated because the result correlates on it. A repeat at the same
+    index closes the old stream before opening the new one. Three of the four adapters therefore
+    remember something, not two.
+  - **Adjacent parts of the same kind are one message.** A model can split its prose across several
+    `text` parts, and the SDK marks the seam with `PartStartEvent.previous_part_kind` /
+    `PartEndEvent.next_part_kind` so a consumer can "group parts of the same kind together". The
+    adapter follows that: a continuing part reuses the open id and emits no new boundary, and the id is
+    parked in a `carried` local across the seam. Pydantic AI's own AG-UI adapter does the same
+    (`pydantic_ai/ui/ag_ui/_event_stream.py`, `follows_text`), so a split response renders identically
+    through AK and through the first-party path. Tool-call parts are excluded — each has its own
+    `tool_call_id`, so there is nothing to group. A promised continuation that never arrives is closed
+    when the stream drains.
+  - **Both tool-result kinds are mapped, and that is not symmetric with the call events.** Pydantic AI
+    reports a call twice — as the part events and again as `function_tool_call` — so the latter is
+    ignored to avoid doubling it. Results arrive once, but under *two* kinds: `function_tool_result`
+    for an ordinary tool and `output_tool_result` for the final-answer call a structured-output run
+    makes. Both map, because with `output_type` set the answer call is bracketed by the part events
+    like any other, so dropping its result leaves a tool card an AG-UI client can never close. Both
+    events subclass `ToolResultEvent` and carry `part: ToolReturnPart | RetryPromptPart`, so one
+    mapper handles them. Pydantic AI's own AG-UI adapter routes both through the same handler
+    (`pydantic_ai/ui/ag_ui/_event_stream.py`, `handle_output_tool_result`), overriding a base class
+    whose default is a no-op.
 - **Boundaries must be derived wherever the framework gives no usable message-start signal, and that
   is ADK *and* LangGraph** — not ADK alone, as this section first claimed.
   - **ADK** has neither a start signal nor an id: a `message_id: str | None` **local** inside
@@ -980,6 +1012,12 @@ posture.
    consequence of 6: the pre-hook declines them, so the filter loop must keep them.
 9. **Agents gain up to four system tools and up to two prompt-suffix paragraphs** — one per enabled block — when the new flags are
    on. Off by default.
+
+10. **Pydantic AI's streamed path stops truncating structured output differently from `run()`.**
+   Intentional, and a fix rather than a regression: `run_stream` treated the first output matching
+   `output_type` as final, so a streamed structured run could truncate where the synchronous `run()`
+   would not. `run_stream_events` wraps `run()` itself, so the two paths now share one behaviour. Any
+   caller who worked around the old divergence no longer needs to.
 
 **Non-changes**, verified and load-bearing:
 

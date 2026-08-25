@@ -521,6 +521,37 @@ branch until PR 6 deletes it.
      - This gap has the same cause as the docs gaps in the header: §*Existing test files that change*
        lists the four files that assert on `Runner.stream` output directly, which is the set found by
         asking what reads the changed contract — not the set found by asking what the deletion breaks.
+  6. Decisions and corrections taken while implementing:
+     - **`output_tool_result` is mapped alongside `function_tool_result`** — found in review. A
+       structured-output run's final answer is an ordinary tool-call part, so the part events bracket
+       it, but its result arrives under a second event kind that was falling through unmapped: the
+       run emitted `tool_call_start` / `args` / `end` and never a result, leaving a tool card an AG-UI
+       client could not close. Behavioural change #10 is what makes the path live. Reproduced, then
+       fixed with one condition — `_tool_result` needed no change, because both events subclass
+       `ToolResultEvent` and carry the same `part`. The asymmetry with `function_tool_call`, which
+       stays ignored, is recorded in §10 so the two are not "tidied" into consistency.
+     - **`PartStartEvent.index` is not usable as an id, correcting §10.** It is scoped to one response
+       and the SDK documents that a repeat *replaces* the part, so a tool-then-answer run would hand two
+       messages the same id. Pydantic AI needs a local after all — `open_parts`, mapping a live index to
+       the id it opened with — which makes §10's "only ADK and LangGraph remember anything" claim wrong:
+       it is three of four. A test drives two `part_start`s at index 0 and asserts two distinct ids.
+     - **`function_tool_call` is ignored, for OpenAI's `message_output_created` reason.** The part events
+       already open, fill and close the call, so mapping the tool event too would emit every call twice.
+       Tested by feeding both and asserting one `ToolCallStart`.
+     - **The history write-back reads the terminal `agent_run_result` event**, captured as it passes,
+       rather than the old context manager's value: `run_stream_events` yields the `AgentRunResult` as
+       its final item instead of exposing it on the CM.
+     - **One of step 5's three doubles failed *silently*, not loudly.** The step predicted a
+       `ValidationError` in all three. True for `test_runtime.py` and `test_pipeline_request_handler.py`,
+       but `ChatService.execute_stream` **catches** a mid-stream raise and converts it to an error chunk,
+       so `test_chat_service_core.py`'s acting-user tests kept passing while the stream was broken — they
+       asserted only the `seen` side effect. Migrated, and given an assertion that no chunk carries an
+       error so a broken double cannot pass again. The lesson generalises: a test that asserts only a
+       side effect cannot tell a working stream from a swallowed exception.
+     - **`core/__init__.py` must not be import-sorted.** Its order is load-bearing — `.model` before
+       `.chat_service`, or `service.py`'s `from ..core import AgentRequest` hits a partially initialised
+       module — which is why the Makefile passes `--skip` for it. Running `isort` directly over `src/`
+       bypasses that and breaks every import in the package; use `make lint`.
 - **Verify:** `uv run pytest` — full suite. Grep `core/runtime.py` for the transitional comment and
 confirm it is gone.
 
