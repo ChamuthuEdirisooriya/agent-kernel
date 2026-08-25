@@ -404,7 +404,7 @@ branch until PR 6 deletes it.
 ## Iteration 5: Google ADK (PR 5)
 
 - **Goal:** ADK emits events, including boundaries it has to derive.
-- **Files:** `framework/adk/adk.py`, `tests/test_adk_runner.py`
+- **Files:** `framework/adk/adk.py`, `tests/test_adk_runner.py`, `tests/test_tool_adk.py`
 - **Steps:**
   1. Stop `continue`-ing on non-partial events — that branch is where function calls and responses
     arrive.
@@ -414,7 +414,77 @@ branch until PR 6 deletes it.
   3. Map function calls and responses onto the tool-call events.
   4. Update `tests/test_adk_runner.py`, including a test that two concurrent `stream()` calls on the
     same runner instance do not share a `message_id`.
-- **Verify:** `uv run pytest tests/test_adk_runner.py`, then the full suite.
+  5. Decisions and corrections taken while implementing:
+     - **`tests/test_tool_adk.py` also changes, and §10's test tables did not say so.** It holds two
+       tests asserting on `stream()`'s output directly (`test_stream_yields_partial_event_text` and
+       `test_stream_skips_non_partial_events`), while §10 lists the file under *must NOT change* —
+       true only for the `supports_streaming` property it was listed for. `spec.md` now records both
+       the correction and the cause: the changing-tests table was derived by grepping test filenames
+       per adapter instead of searching for assertions on `stream()`.
+     - **Non-partial text is emitted when no partial ever arrived**, which goes beyond step 1's
+       letter. ADK normally sends partials then one aggregated non-partial event whose text must be
+       suppressed as a duplicate — but a turn that never streamed would then produce an empty reply,
+       and `test_stream_skips_non_partial_events` was asserting exactly that. The fallback is guarded
+       on nothing having been sent, so it cannot double up, and that test now pins the new behaviour.
+     - **Tool activity closes the reasoning trace, not only answer text** — found in review. A
+       thinking model calling a tool straight out of reasoning, with nothing said in between, was
+       nesting `tool_call_*` inside an open trace and reusing its id on the resuming thought. OpenAI
+       cannot produce that shape, so the two adapters disagreed on ordering for the same concept —
+       the same divergence class step 6 fixed for message boundaries. Reproduced, then fixed by
+       closing the trace before the tool events; §10's "second trace" sentence is now unconditionally
+       true rather than true only when text intervened.
+     - **A thought that only arrives whole is emitted, mirroring the text fallback** — found in the
+       same review. Reasoning was read from partial events only, so a turn that never streamed lost
+       its thinking block while keeping its reply. The guard is *whether any thought streamed this
+       turn*, not whether a trace is open: answer text closes the trace on the very event that
+       streamed the thought, so an open-trace guard let ADK's repeated aggregate through as a
+       duplicate — caught by `test_the_aggregate_re_emits_neither_stream` failing on the first
+       attempt.
+     - **Tool-call ids come from `FunctionCall.id`, not from `uuid4()`.** ADK generates only the
+       `message_id`, because that is the one correlation id it supplies nothing for. A generated
+       tool-call id could not be matched to the `FunctionResponse`, so a call with no id emits
+       nothing — the same rule PR 4 applied to OpenAI.
+     - **A message left open when the stream drains is closed after the loop.** Placed after the
+       `async for` and before the write-back, so a client disconnect raises `GeneratorExit` at a
+       yield and unwinds past it — no synthetic `MessageEnd` on a disconnect, matching §9.
+     - **The concurrency test was negative-tested.** Caching the derived id on the runner instance
+       makes it fail on `a_start.message_id != b_start.message_id`; without that check the test would
+       have passed against the very bug §10 warns about.
+  6. **A self-review caught a tool call nested inside an open text message.** One `Content` can hold
+    prose and a function call, and the first version emitted tool events before the boundary handling,
+     so that case produced `TEXT_MESSAGE_START → CONTENT → TOOL_CALL_* → TEXT_MESSAGE_END`. OpenAI
+     cannot produce that shape, so the two adapters disagreed on the same protocol. Not a proven
+     breach — the `ag_ui` SDK ships no verifier and the example frontend copes — but a divergence a
+     consumer can trip over, fixed by moving one `for` loop below the branches. Two things fell out of
+     it: both `continue`s disappeared, leaving the loop as a decision table, and `_tool_events` stayed
+     wired for *every* event rather than only the non-partial ones, because a partial is not proven
+     never to carry a call and dropping one silently is worse than emitting it early. The ordering is
+     now asserted by a test that was confirmed failing first. The same review also found the `stream`
+     docstring claiming non-partial text is never re-emitted while the code emits it as a fallback,
+     and a test fixture relying on `MagicMock`'s default empty iteration; §10 records the tool-result
+     shape difference the review raised and why it is left alone.
+  7. **ADK was emitting a thinking model's reasoning as the assistant's answer.** `_event_text` joined
+    the text of every part, but reasoning in ADK is `types.Part.thought` — a flag, not an event — so a
+     summary became `TextDelta` and therefore `StreamChunk.delta`, which §4 rule 5 exists to keep it
+     out of. Not merely a missing feature: `delta` is what plain-text clients render and what
+     `ThreadRecorder` persists, so chain-of-thought was going into the saved reply. Fixed by splitting
+     each event's parts into answer and reasoning and deriving a second boundary stream, closed when
+     answer text arrives. **Found by a question about ADK's event model, after the self-review had
+     already passed** — the review checked which *events* ADK sends and never asked what a `Part` can
+     carry, which is the same class of gap as §10's test-table omission. Two things worth keeping:
+     the projection was verified through `Runtime.stream`, not just the event list, because rule 5 is
+     about `delta` and the event list cannot show it; and three `test_tool_adk.py` fixtures had to set
+     `thought = False` explicitly, since a bare `MagicMock` attribute is truthy and would classify
+     every fixture's text as reasoning — a real `types.Part` defaults it to `None`.
+  8. **Handoffs cost no code, and that was the finding worth recording.** Raised for ADK after PR 4
+     mapped OpenAI's handoff run items: nothing was needed here, because `TransferToAgentTool` is a
+     `FunctionTool`, so a transfer arrives as an ordinary `function_call` and step 3's mapping already
+     carries it. Tests were still added, because §10's cross-adapter claim rested on reading the SDK
+     rather than on anything the suite checked — one of them reads the tool's name off
+     `TransferToAgentTool` instead of a literal, so an upstream rename fails rather than silently
+     invalidating the claim. OpenAI remains the only adapter that needed a branch, since it is the
+     only one that lifts handoffs out of its own tool stream.
+- **Verify:** `uv run pytest tests/test_adk_runner.py tests/test_tool_adk.py`, then the full suite.
 
 
 

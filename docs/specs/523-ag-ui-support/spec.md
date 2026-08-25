@@ -786,7 +786,43 @@ first; two need it for the second.
 - **Boundaries must be derived wherever the framework gives no usable message-start signal, and that
   is ADK *and* LangGraph** — not ADK alone, as this section first claimed.
   - **ADK** has neither a start signal nor an id: a `message_id: str | None` **local** inside
-    `stream`, set on the first `partial=True` event and cleared on the first `partial=False`.
+    `stream`, set on the first `partial=True` event and cleared on the first `partial=False`. Two
+    consequences of ADK's event shape, both settled in PR 5:
+    - **Tool events are emitted after the message boundaries.** One `Content` can hold prose and a
+      function call together, so emitting the call first would nest it inside an open text message.
+      OpenAI cannot produce that shape — `response.output_item.done` closes the message before the
+      `function_call` item is added — so ADK matches its ordering and one consumer works against both.
+      The ordering is asserted, not incidental.
+    - **Reasoning is a flag on a part, not an event**, so ADK derives *two* boundary streams rather
+      than one. `types.Part.thought` marks a thinking model's summary, which arrives interleaved with
+      the answer on the same events; joining them would put chain-of-thought into
+      `StreamChunk.delta`, which §4 rule 5 exists to prevent — `delta` is what plain-text clients
+      concatenate as the answer and what `ThreadRecorder` persists. The reasoning trace opens on the
+      first thought text and closes when **either answer text or tool activity** arrives, so a trace
+      resuming after a tool call is a second trace. Closing on tool activity is what makes that true
+      unconditionally: a thinking model calling a tool straight out of reasoning, with no answer text
+      in between, would otherwise nest the tool events inside an open trace and reuse its id — a shape
+      OpenAI cannot produce, because `response.output_item.done` closes the reasoning item before the
+      `function_call` item is added. The same cross-adapter argument as the message boundaries.
+      A thought that arrives **only** on a non-partial event is emitted as one whole trace, mirroring
+      the whole-message text fallback; it is gated on whether any thought streamed during the turn,
+      not on whether a trace is currently open, because answer text closes the trace on the very event
+      that streamed the thought and ADK repeats the full thought on the closing event. ADK never emits
+      thoughts unless the caller's own agent enables them (`BuiltInPlanner(thinking_config=…)`); AK
+      does not turn them on.
+    - **A tool result reads as `{"result": 42}` here and as `42` from OpenAI**, and that is left
+      alone. ADK wraps any non-dict return in `{'result': …}`
+      (`google/adk/flows/llm_flows/functions.py:1252`) while leaving a dict return untouched, so each
+      adapter's `ToolCallResult.content` is literally what its own model was shown — the difference
+      belongs to the frameworks, not to the mapping. Unwrapping a lone `result` key was rejected: it
+      would make a tool that genuinely returns `{"result": x}` indistinguishable from one returning
+      `x`. PR 7's fidelity matrix should carry this rather than re-deriving it.
+    - **Handoffs need no branch, and that is now tested rather than assumed.** `TransferToAgentTool`
+      is a `FunctionTool`, so a transfer reaches the adapter through `get_function_calls()` like any
+      other tool and `_tool_events` maps it unchanged — the same `ToolCall*` events OpenAI emits for
+      the same concept, which is the cross-adapter property the handoff section below claims.
+      `test_adk_runner.py` reads the tool's name off the SDK rather than a literal, so an upstream
+      rename fails the test instead of silently invalidating the claim.
   - **LangGraph** has an id but its `on_chat_model_start` / `on_chat_model_end` fire around *every*
     model call whether or not prose was streamed, so mapping them directly brackets a tool-calling
     turn into a message with nothing in it — the empty assistant bubble §4 rule 4 exists to prevent.
@@ -1015,6 +1051,7 @@ Run with `cd ak-py && uv run pytest`.
 | `tests/test_openai_runner.py:210-212` | `assert deltas == ["hi"]` → assert on the event sequence | 4 |
 | `tests/test_langgraph_runner.py:133, 167` | same | 4 |
 | `tests/test_adk_runner.py:269, 303, 322` | same, plus the derived `MessageStart`/`MessageEnd` | 5 |
+| `tests/test_tool_adk.py:677, 713` | same — two tests assert on ADK's `stream()` output; see the note below the "must NOT change" list | 5 |
 | `tests/test_pydanticai_runner.py:159` | same, plus `framework_context` round trip preserved across the rewrite | 6 |
 | — | **PR 6 additionally** deletes the transitional branch and adds a test asserting a `str`-yielding runner now fails — asserting the `ValidationError` in §4 rule 6, not merely an absence of output | 6 |
 
@@ -1033,7 +1070,15 @@ Named explicitly because they are the compatibility claim:
   their `MockRunner`/`DummyRunner` doubles already declare `supports_streaming` as a property; adding
   the base-class property must make those valid overrides, not break them.
 
-If a file in this list needs an edit, the projection in §4 is wrong.
+If a file in this list needs an edit **for PR 1's reasons**, the projection in §4 is wrong.
+
+**`test_tool_adk.py` is on this list for `supports_streaming` only, and PR 5 changes it anyway.** It
+also holds two tests that assert on `Runner.stream`'s output directly — `test_stream_yields_partial_event_text`
+and what was `test_stream_skips_non_partial_events` (`:677, :713`) — so it belongs in the *changing*
+table above for PR 5, beside `test_adk_runner.py`. The omission came from deriving that table by
+grepping test filenames per adapter rather than by searching for assertions on `stream()`; the same
+class of mistake as the docs-inventory gap recorded in `plan.md`'s header. Nothing else on this list
+is affected: their doubles never assert on real adapter output.
 
 ### Conformance kit
 
