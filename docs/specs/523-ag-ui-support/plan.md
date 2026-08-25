@@ -340,8 +340,64 @@ fidelity.
     branches. Ids come from `on_chat_model_start`'s run id.
   3. Update both test files: `assert deltas == ["hi"]` becomes an assertion on the event sequence.
     `framework_context` round-trip assertions stay as they are.
+  4. Decisions taken while implementing, recorded because PRs 5 and 6 copy this shape:
+     - **Boundaries can only come from OpenAI's raw events, not its run items.** `message_output_created`
+       fires once the message is already complete, so it cannot open one. The raw
+       `response.output_item.added` / `.done` pair brackets both prose and reasoning — one pair of
+       branches, the item's own `type` picking which — and the run-item events are then read *only*
+       for `tool_called` / `tool_output`. Mapping `message_output_created` as well would emit every
+       message twice; there is a test asserting it stays ignored.
+     - **Tool arguments arrive whole, deliberately.** `tool_called` carries complete arguments, so the
+       call is opened, filled and closed together. Streaming them per-token was rejected on a verified
+       fact: `response.function_call_arguments.delta` carries only `item_id`, **never** `call_id`, so
+       progressive args would need a per-run `item_id → call_id` map — and §10 states OpenAI needs no
+       memory. A UI showing arguments being typed is not worth making that sentence false.
+     - **Reasoning is mapped too**, beyond step 1's letter: three branches keyed off `item_id`, no
+       state. `mapping.py` already translates all three to `REASONING_MESSAGE_*`, so without this the
+       example's reasoning rendering would stay dead for OpenAI.
+     - **LangGraph ids are `event["run_id"]`**, which `langchain_core/runnables/schema.py:124` declares
+       required — so it is read directly rather than defensively. A nested model call inside a tool gets
+       its own id, which is what makes start/end pairing work with no adapter memory; a test pins that
+       two concurrent calls do not share one.
+     - **`StepStart`/`StepEnd` are not emitted.** `on_chain_*` fires for every runnable in a LangGraph,
+       not only the nodes a reader would call steps, so choosing which to name is its own decision
+       rather than part of this mapping.
+     - **LangGraph bracketed an empty message on every tool-calling turn, and a review caught it.**
+       `on_chat_model_start` / `on_chat_model_end` were mapped directly, but LangChain fires both
+       whether or not prose was streamed — so a turn where the model emits only a tool call produced
+       `MessageStart` + `MessageEnd` with nothing between. That is exactly what §4 rule 4 restructured
+       itself to avoid ("an empty assistant bubble in any AG-UI client"), and the example frontend does
+       render it: `reduceEvent.ts` pushes an empty assistant line on `TEXT_MESSAGE_START` and
+       `Transcript.tsx` has no empty guard. It was the *common* path for the AG-UI example, whose
+       planner calls `update_agui_state` on nearly every turn. **OpenAI never had the bug** —
+       `response.output_item.added` fires per output item, so a tool-call-only turn yields a
+       `function_call` item and no message boundary — which means the two adapters in one PR disagreed
+       on the same protocol. Fixed by copying `Runtime.stream`'s `legacy_started` shape: a
+       `started: set[str]` local, `MessageStart` deferred to the first non-empty delta, `MessageEnd`
+       only for a call that opened. **The `on_chat_model_start` branch is gone**, which deviates from
+       step 2 above — the id is on the stream event, so the branch earned nothing once the boundary
+       moved. §10 was corrected too: it claimed ADK was the only adapter needing memory, conflating
+       correlation ids with boundary derivation. A set rather than one flag because a tool that calls a
+       model nests a second `run_id`; there is a test for that.
+     - **Handoffs map, and OpenAI was the only adapter that had to be told.** Raised in review: the
+       handoff run items fell through unmapped and nothing recorded whether that was a decision. It was
+       not. They are now mapped as `ToolCall*`, which needed only the two names added to the filter —
+       `handoff_requested` carries a `ResponseFunctionToolCall` and `handoff_occured` carries
+       `{call_id, output}`, so the result correlates on the call's own id. The reason for *that* target
+       rather than `StepStart`/`StepEnd`, which is what the review proposed, is cross-adapter
+       consistency: a handoff stays an ordinary tool call in every other framework — ADK's
+       `TransferToAgentTool` is a `FunctionTool`, Pydantic AI has no handoff primitive so delegation is
+       a tool calling an agent — so steps would have left OpenAI disagreeing with three adapters about
+       one concept. §10 now carries the full eleven-name ledger rather than the handoff row alone.
+     - **One bug found by its own test.** `_tool_arguments` re-serialises LangChain's parsed input dict
+       with `json.dumps(default=str)`, and `default=str` runs arbitrary `__str__` — so the encoder can
+       raise anything, not just `TypeError`/`ValueError`. The first `except` was too narrow and let an
+       exception escape mid-stream, failing a live run over expendable data. Now broad, logged, and the
+       call stays bracketed without its arguments.
 - **Verify:** `uv run pytest tests/test_openai_runner.py tests/test_langgraph_runner.py`, then the
-full suite.
+full suite. The two adapters stop using §4's transitional `str` branch, so
+`test_runtime_stream_events.py` must stay green on its own mock runner — it is what still covers that
+branch until PR 6 deletes it.
 
 
 
@@ -494,6 +550,7 @@ and is retained only to make that uniformity explicit rather than accidental.
 | `advanced/multimodal.md` | — | all five source forms now work; state which are described/stored and which pass through | PR 7 |
 | `integrations/overview.md` | — | add AG-UI to the integration list | PR 7 |
 | new page under `advanced/` | — | AG-UI: routes, config, the fidelity matrix, `agui_state`, `forwardedProps`, `context`, and the tool-call redaction limit. The matrix is the row that forced this table's Owner column to PR 7 — its content is decided by PRs 4-6 | PR 7 |
+| the fidelity matrix's handoff row | — | LangGraph surfaces a handoff only when the application built it as a *tool* (`on_tool_start`/`on_tool_end`); a bare `Command(goto=...)` edge fires `on_chain_*`, which PR 4 declined as too noisy. OpenAI, ADK and Pydantic AI surface it unconditionally, as a tool call | PR 7 |
 | `docs/sidebars.js` | `tutorialSidebar` → `Advanced` category | add the new AG-UI page. The sidebar enumerates every page explicitly rather than autogenerating from the filesystem, so a new `.md` file alone is invisible in the nav | PR 7 |
 | `advanced/threads.md` | — | verified: no change. It documents the `Authoriser` AG-UI now shares, but AG-UI adds no thread behaviour | — |
 
