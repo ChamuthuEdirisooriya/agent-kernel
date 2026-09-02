@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "language": "si",
+  "review_status": "native_speaker_demo_flow_approved",
+  "review_note": "The live five-message demo flow and its leaf-curl, weather, market, and safety wording were approved by a project-team Sinhala reviewer on 2026-08-30. Other specialized disease and pest renderings retain English in parentheses and remain pending agronomic review.",
+  "sources": [
+    {
+      "title": "Sri Lanka Department of Agriculture - Field Crops: Chilli (Sinhala)",
+      "url": "https://doa.gov.lk/field-crops-chilli-si/"
+    },
+    {
+      "title": "Sri Lanka Department of Agriculture - Green Farming (Sinhala)",
+      "url": "https://doa.gov.lk/green-farming/"
+    },
+    {
+      "title": "Sri Lanka Department of Meteorology - Sinhala forecasts",
+      "url": "https://meteo.gov.lk/"
+    }
+  ],
+  "entries": [
+    {"key": "chili", "english": "chili", "sinhala": "මිරිස්", "status": "official_usage"},
+    {"key": "green_chili", "english": "green chili", "sinhala": "අමු මිරිස්", "status": "official_usage"},
+    {"key": "chili_cultivation", "english": "chili cultivation", "sinhala": "මිරිස් වගාව", "status": "official_usage"},
+    {"key": "paddy", "english": "paddy", "sinhala": "වී", "status": "official_usage"},
+    {"key": "paddy_cultivation", "english": "paddy cultivation", "sinhala": "වී වගාව", "status": "official_usage"},
+    {"key": "leaf", "english": "leaf", "sinhala": "පත්‍රය / කොළය", "status": "official_usage"},
+    {"key": "leaf_curl", "english": "leaf curl", "sinhala": "පත්‍ර හැකිළීම (leaf curl)", "status": "native_speaker_approved"},
+    {"key": "anthracnose", "english": "anthracnose", "sinhala": "ඇන්ත්‍රැක්නෝස් (anthracnose)", "status": "pending_review"},
+    {"key": "bacterial_wilt", "english": "bacterial wilt", "sinhala": "බැක්ටීරියා මැලවීම (bacterial wilt)", "status": "pending_review"},
+    {"key": "rice_blast", "english": "rice blast", "sinhala": "වී බ්ලාස්ට් රෝගය (rice blast)", "status": "pending_review"},
+    {"key": "bacterial_blight", "english": "bacterial blight", "sinhala": "බැක්ටීරියා කොළ අංගමාරය (bacterial blight)", "status": "pending_review"},
+    {"key": "brown_planthopper", "english": "brown planthopper", "sinhala": "දුඹුරු පැළ කීඩෑවා (brown planthopper)", "status": "pending_review"},
+    {"key": "weather_forecast", "english": "weather forecast", "sinhala": "කාලගුණ අනාවැකිය", "status": "official_usage"},
+    {"key": "rainfall", "english": "rainfall", "sinhala": "වර්ෂාපතනය", "status": "official_usage"},
+    {"key": "rain_probability", "english": "rain probability", "sinhala": "වර්ෂාපතන සම්භාවිතාව", "status": "official_usage"},
+    {"key": "maximum_temperature", "english": "maximum temperature", "sinhala": "උපරිම උෂ්ණත්වය", "status": "official_usage"},
+    {"key": "minimum_temperature", "english": "minimum temperature", "sinhala": "අවම උෂ්ණත්වය", "status": "official_usage"},
+    {"key": "wind_speed", "english": "wind speed", "sinhala": "සුළං වේගය", "status": "official_usage"},
+    {"key": "market", "english": "market", "sinhala": "වෙළඳපොළ", "status": "official_usage"},
+    {"key": "wholesale_price", "english": "wholesale price", "sinhala": "තොග මිල", "status": "official_usage"},
+    {"key": "reference_price", "english": "reference price", "sinhala": "යොමු මිල", "status": "native_speaker_approved"},
+    {"key": "per_kilogram", "english": "per kilogram", "sinhala": "කිලෝග්‍රෑමයකට", "status": "official_usage"},
+    {"key": "data_date", "english": "data date", "sinhala": "දත්ත දිනය", "status": "plain_language"},
+    {"key": "source", "english": "source", "sinhala": "මූලාශ්‍රය", "status": "official_usage"},
+    {"key": "agricultural_instructor", "english": "agricultural instructor", "sinhala": "කෘෂිකර්ම උපදේශක", "status": "official_usage"},
+    {"key": "agrarian_services_centre", "english": "Agrarian Services Centre", "sinhala": "ගොවිජන සේවා මධ්‍යස්ථානය", "status": "official_usage"}
+  ]
+}

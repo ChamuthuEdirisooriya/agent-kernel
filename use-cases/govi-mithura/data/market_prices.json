@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "data_date": "2026-08-29",
+  "source": {
+    "source": "HARTI Daily Food Commodities Bulletin",
+    "source_url": "https://www.harti.gov.lk/assets/pdf/food_price/daily/eng/2026/August/Vegetables%20Wholesale%20Prices%20%282026.08.29%29.pdf"
+  },
+  "records": [
+    {
+      "commodity": "green chili",
+      "aliases": ["chili", "chilli", "green chilli", "green chillies", "green chilies", "අමු මිරිස්", "මිරිස්"],
+      "market": "Peliyagoda",
+      "market_aliases": ["පෑලියගොඩ"],
+      "price_min_lkr": 400,
+      "price_max_lkr": 500,
+      "unit": "kg",
+      "price_type": "wholesale",
+      "data_date": "2026-08-29",
+      "source_document": "HARTI Daily Food Commodities Bulletin, 29 August 2026"
+    },
+    {
+      "commodity": "green chili",
+      "aliases": ["chili", "chilli", "green chilli", "green chillies", "green chilies", "අමු මිරිස්", "මිරිස්"],
+      "market": "Dambulla",
+      "market_aliases": ["දඹුල්ල"],
+      "price_min_lkr": 450,
+      "price_max_lkr": 500,
+      "unit": "kg",
+      "price_type": "wholesale",
+      "data_date": "2026-08-29",
+      "source_document": "HARTI Daily Food Commodities Bulletin, 29 August 2026"
+    },
+    {
+      "commodity": "green chili",
+      "aliases": ["chili", "chilli", "green chilli", "green chillies", "green chilies", "අමු මිරිස්", "මිරිස්"],
+      "market": "Meegoda",
+      "market_aliases": ["මීගොඩ"],
+      "price_min_lkr": 550,
+      "price_max_lkr": 600,
+      "unit": "kg",
+      "price_type": "wholesale",
+      "data_date": "2026-08-28",
+      "source_document": "HARTI Daily Food Commodities Bulletin, 29 August 2026"
+    }
+  ]
+}

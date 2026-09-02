@@ -1,0 +1,15 @@
+session:
+  type: in_memory
+
+whatsapp:
+  agent: "govi_mithura"
+  api_version: "v25.0"
+
+test:
+  mode: fuzzy
+
+logging:
+  ak:
+    level: INFO
+  system:
+    level: INFO

@@ -1,0 +1,53 @@
+[project]
+name = "govi-mithura"
+version = "0.1.0"
+description = "Memory-aware multilingual farming support through WhatsApp"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "agentkernel[api,cli,gcp,langgraph,whatsapp]>=0.8.1",
+    # Match the versions verified by the repository's official LangGraph example lockfile.
+    "langchain-openai==1.1.16",
+    "langchain-google-genai>=4.0.0,<5.0.0",
+    "langgraph==1.0.6",
+    "langgraph-prebuilt==1.0.6",
+    "langgraph-supervisor==0.0.31",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0.2",
+]
+
+[dependency-groups]
+dev = [
+    "agentkernel[test]>=0.8.1",
+    "black==26.5.1",
+    "isort>=5.0.0",
+    "mypy>=1.0.0",
+    "pytest>=8.4.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.isort]
+profile = "black"
+line_length = 120
+skip = [".venv", ".uv-cache", ".mypy_cache", ".pytest_cache"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    "ignore:create_react_agent has been moved to `langchain.agents`:langgraph.warnings.LangGraphDeprecatedSinceV10",
+]
